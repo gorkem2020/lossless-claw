@@ -9,8 +9,8 @@ import { toStoredMessage } from "./message-normalization.js";
 type AgentMessage = Parameters<ContextEngine["ingest"]>[0]["message"];
 
 type BootstrapTokenConfig = {
-  bootstrapMaxTokens: number;
-  leafChunkTokens: number;
+  bootstrapMaxTokens?: number;
+  leafChunkTokens?: number;
 };
 
 function isBootstrapMessage(value: unknown): value is AgentMessage {
