@@ -53,6 +53,7 @@ function createTestConfig(databasePath: string): LcmConfig {
     proactiveThresholdCompactionMode: "deferred",
     autoRotateSessionFiles: {
       enabled: true,
+      createBackups: false,
       sizeBytes: 2 * 1024 * 1024,
       startup: "rotate",
       runtime: "rotate",

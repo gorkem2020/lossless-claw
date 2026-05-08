@@ -7583,16 +7583,20 @@ export class LcmContextEngine implements ContextEngine {
       return;
     }
 
-    // The actual write path is intentionally the same backup-backed helper used
-    // by `/lcm rotate` so DB backup, queueing, and checkpoint semantics match.
-    let result: RotateSessionStorageWithBackupResult;
+    let result: RotateSessionStorageResult | RotateSessionStorageWithBackupResult;
     try {
-      result = await this.rotateSessionStorageWithBackup({
-        sessionId,
-        sessionKey,
-        sessionFile,
-        lockTimeoutMs: AUTO_ROTATE_DATABASE_LOCK_TIMEOUT_MS,
-      });
+      result = this.config.autoRotateSessionFiles.createBackups
+        ? await this.rotateSessionStorageWithBackup({
+            sessionId,
+            sessionKey,
+            sessionFile,
+            lockTimeoutMs: AUTO_ROTATE_DATABASE_LOCK_TIMEOUT_MS,
+          })
+        : await this.rotateSessionStorage({
+            sessionId,
+            sessionKey,
+            sessionFile,
+          });
     } catch (error) {
       this.logAutoRotateSessionFileDecision({
         ...baseLog,
@@ -7613,17 +7617,20 @@ export class LcmContextEngine implements ContextEngine {
       } else {
         this.oversizedAutoRotateCheckpointByQueueKey.delete(queueKey);
       }
+      const conversationId = "currentConversationId" in result
+        ? result.currentConversationId
+        : result.conversationId;
       this.logAutoRotateSessionFileDecision({
         ...baseLog,
         action: "rotate",
-        conversationId: result.currentConversationId,
+        conversationId,
         sizeBytes,
         durationMs: Date.now() - startedAt,
-        backupPath: result.backupPath,
+        backupPath: "backupPath" in result ? result.backupPath : undefined,
         bytesRemoved: result.bytesRemoved,
         preservedTailMessageCount: result.preservedTailMessageCount,
         checkpointSize: result.checkpointSize,
-        currentMessageCount: result.currentMessageCount,
+        currentMessageCount: "currentMessageCount" in result ? result.currentMessageCount : undefined,
       });
       return;
     }
@@ -7631,11 +7638,13 @@ export class LcmContextEngine implements ContextEngine {
     this.logAutoRotateSessionFileDecision({
       ...baseLog,
       action: "warn",
-      conversationId: result.currentConversationId ?? conversation.conversationId,
+      conversationId: "currentConversationId" in result
+        ? result.currentConversationId ?? conversation.conversationId
+        : conversation.conversationId,
       sizeBytes,
       durationMs: Date.now() - startedAt,
-      backupPath: result.backupPath,
-      currentMessageCount: result.currentMessageCount,
+      backupPath: "backupPath" in result ? result.backupPath : undefined,
+      currentMessageCount: "currentMessageCount" in result ? result.currentMessageCount : undefined,
       reason: result.kind,
       error: result.reason,
       level: "warn",
@@ -7820,35 +7829,39 @@ export class LcmContextEngine implements ContextEngine {
               return { ...empty(), warned: 1 };
             }
 
-            let backupPath: string | null = null;
-            try {
-              backupPath = createLcmDatabaseBackup(this.db, {
-                databasePath: this.config.databasePath,
-                label: "rotate",
-                replaceLatest: true,
-              });
-            } catch (error) {
-              this.logAutoRotateSessionFileDecision({
-                phase: "startup",
-                action: "warn",
-                thresholdBytes: params.thresholdBytes,
-                durationMs: Date.now() - params.startedAt,
-                reason: "backup-failed",
-                error: describeLogError(error),
-                level: "warn",
-              });
-              return { ...empty(), warned: 1 };
-            }
-            if (!backupPath) {
-              this.logAutoRotateSessionFileDecision({
-                phase: "startup",
-                action: "warn",
-                thresholdBytes: params.thresholdBytes,
-                durationMs: Date.now() - params.startedAt,
-                reason: "backup-unavailable",
-                level: "warn",
-              });
-              return { ...empty(), warned: 1 };
+            let backupPath: string | undefined;
+            let backupCreated = 0;
+            if (this.config.autoRotateSessionFiles.createBackups) {
+              try {
+                backupPath = createLcmDatabaseBackup(this.db, {
+                  databasePath: this.config.databasePath,
+                  label: "rotate",
+                  replaceLatest: true,
+                }) ?? undefined;
+              } catch (error) {
+                this.logAutoRotateSessionFileDecision({
+                  phase: "startup",
+                  action: "warn",
+                  thresholdBytes: params.thresholdBytes,
+                  durationMs: Date.now() - params.startedAt,
+                  reason: "backup-failed",
+                  error: describeLogError(error),
+                  level: "warn",
+                });
+                return { ...empty(), warned: 1 };
+              }
+              if (!backupPath) {
+                this.logAutoRotateSessionFileDecision({
+                  phase: "startup",
+                  action: "warn",
+                  thresholdBytes: params.thresholdBytes,
+                  durationMs: Date.now() - params.startedAt,
+                  reason: "backup-unavailable",
+                  level: "warn",
+                });
+                return { ...empty(), warned: 1 };
+              }
+              backupCreated = 1;
             }
 
             const result: StartupAutoRotateBatchResult = {
@@ -7856,7 +7869,7 @@ export class LcmContextEngine implements ContextEngine {
               warned: 0,
               bytesRemoved: 0,
               backupPath,
-              backupCreated: 1,
+              backupCreated,
             };
             for (const candidate of params.candidates) {
               let rotateResult: RotateSessionStorageResult;

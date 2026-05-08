@@ -45,6 +45,7 @@ describe("resolveLcmConfig", () => {
     expect(config.proactiveThresholdCompactionMode).toBe("deferred");
     expect(config.autoRotateSessionFiles).toEqual({
       enabled: true,
+      createBackups: false,
       sizeBytes: DEFAULT_AUTO_ROTATE_SESSION_FILE_SIZE_BYTES,
       startup: "rotate",
       runtime: "rotate",
@@ -83,6 +84,7 @@ describe("resolveLcmConfig", () => {
       proactiveThresholdCompactionMode: "inline",
       autoRotateSessionFiles: {
         enabled: false,
+        createBackups: true,
         sizeBytes: 123456,
         startup: "warn",
         runtime: "off",
@@ -122,6 +124,7 @@ describe("resolveLcmConfig", () => {
     expect(config.proactiveThresholdCompactionMode).toBe("inline");
     expect(config.autoRotateSessionFiles).toEqual({
       enabled: false,
+      createBackups: true,
       sizeBytes: 123456,
       startup: "warn",
       runtime: "off",
@@ -155,6 +158,7 @@ describe("resolveLcmConfig", () => {
       LCM_SKIP_STATELESS_SESSIONS: "false",
       LCM_TRANSCRIPT_GC_ENABLED: "true",
       LCM_AUTO_ROTATE_SESSION_FILES_ENABLED: "false",
+      LCM_AUTO_ROTATE_SESSION_FILES_CREATE_BACKUPS: "true",
       LCM_AUTO_ROTATE_SESSION_FILES_SIZE_BYTES: "987654",
       LCM_AUTO_ROTATE_SESSION_FILES_STARTUP: "warn",
       LCM_AUTO_ROTATE_SESSION_FILES_RUNTIME: "off",
@@ -181,6 +185,7 @@ describe("resolveLcmConfig", () => {
       proactiveThresholdCompactionMode: "deferred",
       autoRotateSessionFiles: {
         enabled: true,
+        createBackups: false,
         sizeBytes: 123456,
         startup: "rotate",
         runtime: "rotate",
@@ -214,6 +219,7 @@ describe("resolveLcmConfig", () => {
     expect(config.proactiveThresholdCompactionMode).toBe("inline");
     expect(config.autoRotateSessionFiles).toEqual({
       enabled: false,
+      createBackups: true,
       sizeBytes: 987654,
       startup: "warn",
       runtime: "off",
@@ -295,6 +301,7 @@ describe("resolveLcmConfig", () => {
       skipStatelessSessions: "false",
       autoRotateSessionFiles: {
         enabled: "false",
+        createBackups: "true",
         sizeBytes: "4096",
         startup: "warn",
         runtime: "off",
@@ -317,6 +324,7 @@ describe("resolveLcmConfig", () => {
     expect(config.skipStatelessSessions).toBe(false);
     expect(config.autoRotateSessionFiles).toEqual({
       enabled: false,
+      createBackups: true,
       sizeBytes: 4096,
       startup: "warn",
       runtime: "off",
@@ -333,6 +341,7 @@ describe("resolveLcmConfig", () => {
       enabled: "maybe",
       autoRotateSessionFiles: {
         enabled: "maybe",
+        createBackups: "maybe",
         sizeBytes: "not-a-number",
         startup: "notify",
         runtime: "compact",
@@ -346,6 +355,7 @@ describe("resolveLcmConfig", () => {
     expect(config.enabled).toBe(true); // falls through to default
     expect(config.autoRotateSessionFiles).toEqual({
       enabled: true,
+      createBackups: false,
       sizeBytes: DEFAULT_AUTO_ROTATE_SESSION_FILE_SIZE_BYTES,
       startup: "rotate",
       runtime: "rotate",
@@ -647,6 +657,7 @@ describe("resolveLcmConfig", () => {
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean" },
+        createBackups: { type: "boolean" },
         sizeBytes: { type: "integer", minimum: 1 },
         startup: { type: "string", enum: ["rotate", "warn", "off"] },
         runtime: { type: "string", enum: ["rotate", "warn", "off"] },

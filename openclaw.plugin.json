@@ -220,6 +220,10 @@
       "label": "Auto-Rotate Session Files",
       "help": "Automatically rotate oversized LCM-managed session JSONL files after startup and runtime checks"
     },
+    "autoRotateSessionFiles.createBackups": {
+      "label": "Auto-Rotate Backups",
+      "help": "Create the rolling rotate-latest SQLite backup before automatic session-file rotation; disabled by default"
+    },
     "autoRotateSessionFiles.sizeBytes": {
       "label": "Auto-Rotate Size Bytes",
       "help": "Session JSONL byte threshold for automatic rotation (default: 2097152)"
@@ -443,6 +447,9 @@
         "additionalProperties": false,
         "properties": {
           "enabled": {
+            "type": "boolean"
+          },
+          "createBackups": {
             "type": "boolean"
           },
           "sizeBytes": {

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
@@ -56,6 +56,7 @@ function createTestConfig(databasePath: string): LcmConfig {
     proactiveThresholdCompactionMode: "deferred",
     autoRotateSessionFiles: {
       enabled: true,
+      createBackups: false,
       sizeBytes: 2 * 1024 * 1024,
       startup: "rotate",
       runtime: "rotate",
@@ -3386,6 +3387,10 @@ describe("LcmContextEngine.bootstrap", () => {
     const sessionFile = createSessionFilePath("auto-rotate-runtime");
     const messages = createBulkySession(sessionFile, 14);
     const beforeSize = statSync(sessionFile).size;
+    const databaseDir = mkdtempSync(join(tmpdir(), "lossless-claw-auto-rotate-db-"));
+    tempDirs.push(databaseDir);
+    const databasePath = join(databaseDir, "lcm.db");
+    const latestBackupPath = join(databaseDir, "lcm.db.rotate-latest.bak");
     const log = {
       info: vi.fn(),
       warn: vi.fn(),
@@ -3394,9 +3399,11 @@ describe("LcmContextEngine.bootstrap", () => {
     };
     const engine = createEngineWithDeps(
       {
+        databasePath,
         freshTailCount: 1,
         autoRotateSessionFiles: {
           enabled: true,
+          createBackups: false,
           sizeBytes: 1_500,
           startup: "off",
           runtime: "rotate",
@@ -3431,10 +3438,11 @@ describe("LcmContextEngine.bootstrap", () => {
     expect(rotateLog).toContain("sizeBytes=");
     expect(rotateLog).toContain("thresholdBytes=1500");
     expect(rotateLog).toContain("durationMs=");
-    expect(rotateLog).toContain("backupPath=");
+    expect(rotateLog).not.toContain("backupPath=");
     expect(rotateLog).toContain("bytesRemoved=");
     expect(rotateLog).toContain("preservedTailMessageCount=1");
     expect(rotateLog).toContain("checkpointSize=");
+    expect(existsSync(latestBackupPath)).toBe(false);
   });
 
   it("leaves below-threshold session files alone while logging the decision", async () => {
@@ -3451,6 +3459,7 @@ describe("LcmContextEngine.bootstrap", () => {
       {
         autoRotateSessionFiles: {
           enabled: true,
+          createBackups: false,
           sizeBytes: beforeSize + 1_000,
           startup: "off",
           runtime: "rotate",
@@ -3496,6 +3505,7 @@ describe("LcmContextEngine.bootstrap", () => {
         statelessSessionPatterns: ["agent:*:subagent:**"],
         autoRotateSessionFiles: {
           enabled: true,
+          createBackups: false,
           sizeBytes: 500,
           startup: "off",
           runtime: "rotate",
@@ -3558,6 +3568,7 @@ describe("LcmContextEngine.bootstrap", () => {
         freshTailCount: 1,
         autoRotateSessionFiles: {
           enabled: true,
+          createBackups: false,
           sizeBytes: 1_500,
           startup: "rotate",
           runtime: "off",
@@ -3575,9 +3586,11 @@ describe("LcmContextEngine.bootstrap", () => {
     expect(autoRotateLogs).toEqual(
       expect.arrayContaining([
         expect.stringContaining("phase=startup action=rotate"),
-        expect.stringContaining("backupPath="),
       ]),
     );
+    expect(autoRotateLogs.some((message) => message.includes("backupPath="))).toBe(false);
+    const summaryLog = autoRotateLogs.find((message) => message.includes("action=summary"));
+    expect(summaryLog).toContain("backupCreated=0");
     expect(readSessionMessages(sessionFile)).toHaveLength(1);
     expect(readSessionMessages(sessionFile)[0]?.role).toBe(messages[messages.length - 1]?.role);
   });
@@ -3604,6 +3617,7 @@ describe("LcmContextEngine.bootstrap", () => {
         freshTailCount: 1,
         autoRotateSessionFiles: {
           enabled: true,
+          createBackups: false,
           sizeBytes: 1_500,
           startup: "rotate",
           runtime: "off",
@@ -3673,6 +3687,7 @@ describe("LcmContextEngine.bootstrap", () => {
         freshTailCount: 1,
         autoRotateSessionFiles: {
           enabled: true,
+          createBackups: false,
           sizeBytes: belowThresholdBytes,
           startup: "rotate",
           runtime: "off",
@@ -3759,6 +3774,7 @@ describe("LcmContextEngine.bootstrap", () => {
         freshTailCount: 1,
         autoRotateSessionFiles: {
           enabled: true,
+          createBackups: true,
           sizeBytes: 1_500,
           startup: "rotate",
           runtime: "off",
@@ -3840,6 +3856,7 @@ describe("LcmContextEngine.bootstrap", () => {
         freshTailCount: 1,
         autoRotateSessionFiles: {
           enabled: true,
+          createBackups: false,
           sizeBytes: 1_500,
           startup: "off",
           runtime: "rotate",

@@ -55,6 +55,7 @@ function makeDeps(overrides?: Partial<LcmDependencies>): LcmDependencies {
       proactiveThresholdCompactionMode: "deferred",
       autoRotateSessionFiles: {
         enabled: true,
+        createBackups: false,
         sizeBytes: 2 * 1024 * 1024,
         startup: "rotate",
         runtime: "rotate",

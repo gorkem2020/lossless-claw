@@ -65,6 +65,7 @@ export type AutoRotateSessionFileMode = "rotate" | "warn" | "off";
 
 export type AutoRotateSessionFilesConfig = {
   enabled: boolean;
+  createBackups: boolean;
   sizeBytes: number;
   startup: AutoRotateSessionFileMode;
   runtime: AutoRotateSessionFileMode;
@@ -504,6 +505,10 @@ export function resolveLcmConfigWithDiagnostics(
           env.LCM_AUTO_ROTATE_SESSION_FILES_ENABLED !== undefined
             ? env.LCM_AUTO_ROTATE_SESSION_FILES_ENABLED !== "false"
             : toBool(autoRotateSessionFiles?.enabled) ?? true,
+        createBackups:
+          env.LCM_AUTO_ROTATE_SESSION_FILES_CREATE_BACKUPS !== undefined
+            ? env.LCM_AUTO_ROTATE_SESSION_FILES_CREATE_BACKUPS === "true"
+            : toBool(autoRotateSessionFiles?.createBackups) ?? false,
         sizeBytes: autoRotateSessionFileSizeBytes,
         startup:
           toAutoRotateSessionFileMode(env.LCM_AUTO_ROTATE_SESSION_FILES_STARTUP)
