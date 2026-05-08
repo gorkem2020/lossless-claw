@@ -1832,7 +1832,7 @@ export class LcmContextEngine implements ContextEngine {
         );
       } else {
         migrationOk = true;
-        this.deps.log.info(
+        this.deps.log.debug(
           `[lcm] Migration run completed during engine init: duration=${formatDurationMs(Date.now() - migrationStartedAt)} fts5=${this.fts5Available}`,
         );
         this.deps.log.debug(
@@ -2021,12 +2021,12 @@ export class LcmContextEngine implements ContextEngine {
       return;
     }
     const migrationStartedAt = Date.now();
-    this.deps.log.info("[lcm] ensureMigrated: running migrations lazily");
+    this.deps.log.debug("[lcm] ensureMigrated: running migrations lazily");
     runLcmMigrations(this.db, {
       log: this.deps.log,
     });
     this.migrated = true;
-    this.deps.log.info(
+    this.deps.log.debug(
       `[lcm] ensureMigrated: completed in ${formatDurationMs(Date.now() - migrationStartedAt)}`,
     );
   }
@@ -2061,7 +2061,7 @@ export class LcmContextEngine implements ContextEngine {
     const waitMs = Date.now() - waitStartedAt;
     if (options?.operationName) {
       const detail = options.context ? ` ${options.context}` : "";
-      this.deps.log.info(
+      this.deps.log.debug(
         `[lcm] ${options.operationName}: session queue acquired queueKey=${queueKey} queuedAhead=${queuedAhead} wait=${formatDurationMs(waitMs)}${detail}`,
       );
     }
@@ -2826,7 +2826,7 @@ export class LcmContextEngine implements ContextEngine {
       && params.cachePromptTokenCount > 0
         ? `${((params.cacheRead / params.cachePromptTokenCount) * 100).toFixed(1)}%`
         : "null";
-    this.deps.log.info(
+    this.deps.log.debug(
       `[lcm] incremental compaction decision: conversation=${params.conversationId} cacheState=${params.cacheState} activityBand=${params.activityBand} tokenBudget=${params.tokenBudget} currentTokenCount=${params.currentTokenCount ?? "null"} cacheRead=${params.cacheRead ?? "null"} cacheWrite=${params.cacheWrite ?? "null"} cachePromptTokenCount=${params.cachePromptTokenCount ?? "null"} cacheReadSharePct=${cacheReadSharePct} triggerLeafChunkTokens=${params.triggerLeafChunkTokens} preferredLeafChunkTokens=${params.preferredLeafChunkTokens} fallbackLeafChunkTokens=${params.fallbackLeafChunkTokens.join(",")} rawTokensOutsideTail=${params.rawTokensOutsideTail} threshold=${params.threshold} shouldCompact=${params.shouldCompact} maxPasses=${params.maxPasses} allowCondensedPasses=${params.allowCondensedPasses} reason=${params.reason}`,
     );
     return {
@@ -3036,7 +3036,7 @@ export class LcmContextEngine implements ContextEngine {
       tokenBudget: params.tokenBudget,
       currentTokenCount: params.currentTokenCount ?? null,
     });
-    this.deps.log.info(
+    this.deps.log.debug(
       `[lcm] deferred compaction debt recorded: conversation=${params.conversationId} reason=${params.reason} tokenBudget=${params.tokenBudget} currentTokenCount=${params.currentTokenCount ?? "null"}`,
     );
   }
@@ -3069,7 +3069,7 @@ export class LcmContextEngine implements ContextEngine {
       ...(params.sessionKey?.trim() ? [`sessionKey=${params.sessionKey.trim()}`] : []),
     ].join(" ");
     if (this.sessionOperationQueues.has(params.queueKey)) {
-      this.deps.log.info(
+      this.deps.log.debug(
         `[lcm] background deferred compaction skipped conversation=${params.conversationId} ${sessionLabel} reason=session-queue-busy debtReason=${params.reason}`,
       );
       return;
@@ -3083,7 +3083,7 @@ export class LcmContextEngine implements ContextEngine {
             params.conversationId,
           );
         if (!maintenance?.pending && !maintenance?.running) {
-          this.deps.log.info(
+          this.deps.log.debug(
             `[lcm] background deferred compaction skipped conversation=${params.conversationId} ${sessionLabel} reason=no-pending-debt debtReason=${params.reason}`,
           );
           return;
@@ -3111,7 +3111,7 @@ export class LcmContextEngine implements ContextEngine {
             debtReason: maintenance.reason ?? params.reason,
           })
         ) {
-          this.deps.log.info(
+          this.deps.log.debug(
             `[lcm] background deferred compaction skipped conversation=${params.conversationId} ${sessionLabel} reason=hot-cache retention=${telemetry?.retention ?? "null"} lastCacheTouchAt=${telemetry?.lastCacheTouchAt?.toISOString() ?? "null"} debtReason=${maintenance.reason ?? params.reason}`,
           );
           return;
@@ -3133,7 +3133,7 @@ export class LcmContextEngine implements ContextEngine {
           legacyParams,
         });
         if (result) {
-          this.deps.log.info(
+          this.deps.log.debug(
             `[lcm] background deferred compaction done conversation=${params.conversationId} ${sessionLabel} changed=${result.changed} reason=${result.reason ?? "none"} debtReason=${maintenance.reason ?? params.reason}`,
           );
         }
@@ -3230,7 +3230,7 @@ export class LcmContextEngine implements ContextEngine {
                       : "deferred compaction no longer needed",
                   };
                 }
-                this.deps.log.info(
+                this.deps.log.debug(
                   `[lcm] maintain: deferred prompt-cache leaf debt ignoring effective hot-cache state after TTL expiry conversation=${params.conversationId} ${sessionLabel} reason=${leafDecision.reason} retention=${telemetry?.retention ?? "null"} lastCacheTouchAt=${telemetry?.lastCacheTouchAt?.toISOString() ?? "null"}`,
                 );
               }
@@ -3255,7 +3255,7 @@ export class LcmContextEngine implements ContextEngine {
         failureSummary: result.ok ? null : result.reason ?? "deferred compaction failed",
         keepPending: !result.ok || result.reason === DEFERRED_COMPACTION_STILL_NEEDED_REASON,
       });
-      this.deps.log.info(
+      this.deps.log.debug(
         `[lcm] maintain: deferred compaction ${result.compacted ? "completed" : "skipped"} conversation=${params.conversationId} ${sessionLabel} changed=${result.compacted} ok=${result.ok} reason=${result.reason ?? "none"}`,
       );
       return {
@@ -3354,7 +3354,7 @@ export class LcmContextEngine implements ContextEngine {
           return;
         }
 
-        this.deps.log.info(
+        this.deps.log.debug(
           `[lcm] assemble: deferred compaction still cache-hot for conversation=${params.conversationId} ${sessionLabel} retention=${telemetry?.retention ?? "null"} lastCacheTouchAt=${telemetry?.lastCacheTouchAt?.toISOString() ?? "null"}`,
         );
       },
@@ -4653,7 +4653,7 @@ export class LcmContextEngine implements ContextEngine {
       sessionKey: params.sessionKey,
     });
     if (historicalMessages.length === 0) {
-      this.deps.log.info(
+      this.deps.log.debug(
         `[lcm] reconcileSessionTail: skipped for ${sessionContext} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=0 reason=empty-history`,
       );
       return { blockedByImportCap: false, importedMessages: 0, hasOverlap: false };
@@ -4661,7 +4661,7 @@ export class LcmContextEngine implements ContextEngine {
 
     const latestDbMessage = await this.conversationStore.getLastMessage(conversationId);
     if (!latestDbMessage) {
-      this.deps.log.info(
+      this.deps.log.debug(
         `[lcm] reconcileSessionTail: skipped for ${sessionContext} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} reason=no-db-tail`,
       );
       return { blockedByImportCap: false, importedMessages: 0, hasOverlap: false };
@@ -4685,7 +4685,7 @@ export class LcmContextEngine implements ContextEngine {
         }
       }
       if (dbOccurrences === historicalOccurrences) {
-        this.deps.log.info(
+        this.deps.log.debug(
           `[lcm] reconcileSessionTail: fast path for ${sessionContext} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} importedMessages=0 overlap=true`,
         );
         return { blockedByImportCap: false, importedMessages: 0, hasOverlap: true };
@@ -4753,14 +4753,14 @@ export class LcmContextEngine implements ContextEngine {
       }
 
       if (anchorIndex < 0) {
-        this.deps.log.info(
+        this.deps.log.debug(
           `[lcm] reconcileSessionTail: no anchor for ${sessionContext} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} importedMessages=0 overlap=false`,
         );
         return { blockedByImportCap: false, importedMessages: 0, hasOverlap: false };
       }
     }
     if (anchorIndex >= historicalMessages.length - 1) {
-      this.deps.log.info(
+      this.deps.log.debug(
         `[lcm] reconcileSessionTail: anchor at tip for ${sessionContext} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} importedMessages=0 overlap=true`,
       );
       return { blockedByImportCap: false, importedMessages: 0, hasOverlap: true };
@@ -4773,7 +4773,7 @@ export class LcmContextEngine implements ContextEngine {
       this.deps.log.warn(
         `[lcm] reconcileSessionTail: import cap exceeded for ${sessionContext} — would import ${missingTail.length} messages (existing: ${existingDbCount}). Aborting to prevent flood.`,
       );
-      this.deps.log.info(
+      this.deps.log.debug(
         `[lcm] reconcileSessionTail: blocked for ${sessionContext} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} missingTail=${missingTail.length} existingDbCount=${existingDbCount}`,
       );
       return { blockedByImportCap: true, importedMessages: 0, hasOverlap: true };
@@ -4787,7 +4787,7 @@ export class LcmContextEngine implements ContextEngine {
       }
     }
 
-    this.deps.log.info(
+    this.deps.log.debug(
       `[lcm] reconcileSessionTail: slow path for ${sessionContext} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} anchorIndex=${anchorIndex} missingTail=${missingTail.length} importedMessages=${importedMessages}`,
     );
     return { blockedByImportCap: false, importedMessages, hasOverlap: true };
@@ -4882,7 +4882,7 @@ export class LcmContextEngine implements ContextEngine {
           && rememberedFileState.size === sessionFileState.size
           && rememberedFileState.mtimeMs === sessionFileState.mtimeMs
         ) {
-          this.deps.log.info(
+          this.deps.log.debug(
             `[lcm] afterTurn: transcript reconcile slow path skipped (file state already read this process) conversation=${conversation.conversationId} reason=${reason} sessionFile=${params.sessionFile}`,
           );
           return { importedMessages: 0, blockedByImportCap: false };
@@ -5141,7 +5141,7 @@ export class LcmContextEngine implements ContextEngine {
             if (!conversation.bootstrappedAt) {
               await this.conversationStore.markConversationBootstrapped(conversationId);
             }
-            this.deps.log.info(
+            this.deps.log.debug(
               `[lcm] bootstrap: checkpoint hit conversation=${conversationId} ${sessionLabel} existingCount=${existingCount} duration=${formatDurationMs(Date.now() - startedAt)}`,
             );
             return {
@@ -5218,7 +5218,7 @@ export class LcmContextEngine implements ContextEngine {
                 if (importedMessages > 0) {
                   this.clearStableOrphanStrippingOrdinal(conversationId);
                 }
-                this.deps.log.info(
+                this.deps.log.debug(
                   `[lcm] bootstrap: append-only conversation=${conversationId} ${sessionLabel} existingCount=${existingCount} appendedMessages=${appended.messages.length} importedMessages=${importedMessages} duration=${formatDurationMs(Date.now() - startedAt)}`,
                 );
 
@@ -5250,7 +5250,7 @@ export class LcmContextEngine implements ContextEngine {
               cached.mtimeMs === sessionFileMtimeMs
             ) {
               await persistBootstrapState(conversationId);
-              this.deps.log.info(
+              this.deps.log.debug(
                 `[lcm] bootstrap: skipped full read (file unchanged) conversation=${conversationId} ${sessionLabel} duration=${formatDurationMs(Date.now() - startedAt)}`,
               );
               return {
@@ -5262,7 +5262,7 @@ export class LcmContextEngine implements ContextEngine {
           }
 
           const historicalMessages = await readLeafPathMessages(params.sessionFile);
-          this.deps.log.info(
+          this.deps.log.debug(
             `[lcm] bootstrap: full transcript read conversation=${conversationId} ${sessionLabel} existingCount=${existingCount} historicalMessages=${historicalMessages.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
           );
 
@@ -5320,7 +5320,7 @@ export class LcmContextEngine implements ContextEngine {
             if (importedMessages > 0) {
               this.clearStableOrphanStrippingOrdinal(conversationId);
             }
-            this.deps.log.info(
+            this.deps.log.debug(
               `[lcm] bootstrap: initial import conversation=${conversationId} ${sessionLabel} importedMessages=${importedMessages} sourceMessages=${historicalMessages.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
             );
 
@@ -5339,7 +5339,7 @@ export class LcmContextEngine implements ContextEngine {
             historicalMessages,
             checkpointEntryHash: bootstrapState?.lastProcessedEntryHash,
           });
-          this.deps.log.info(
+          this.deps.log.debug(
             `[lcm] bootstrap: reconcile finished conversation=${conversationId} ${sessionLabel} importedMessages=${reconcile.importedMessages} overlap=${reconcile.hasOverlap} blockedByImportCap=${reconcile.blockedByImportCap} duration=${formatDurationMs(Date.now() - startedAt)}`,
           );
 
@@ -5428,7 +5428,7 @@ export class LcmContextEngine implements ContextEngine {
       );
     }
 
-    this.deps.log.info(
+    this.deps.log.debug(
       `[lcm] bootstrap: done ${sessionLabel} bootstrapped=${result.bootstrapped} importedMessages=${result.importedMessages} reason=${result.reason ?? "none"} duration=${formatDurationMs(Date.now() - startedAt)}`,
     );
     return result;
@@ -5562,7 +5562,7 @@ export class LcmContextEngine implements ContextEngine {
           }
         }
         if (tailMatch) {
-          this.deps.log.info(
+          this.deps.log.debug(
             `[lcm] dedup: tail-match detected, batch already fully stored ` +
               `(storedCount=${storedMessageCount} batchLen=${batch.length}), skipping entire batch`,
           );
@@ -5635,7 +5635,7 @@ export class LcmContextEngine implements ContextEngine {
       }
       const newSlice = batch.slice(k + 1);
       if (suffixMatch && (newSlice.length > 0 || matchLen > 1)) {
-        this.deps.log.info(
+        this.deps.log.debug(
           `[lcm] dedup: ${context} suffix-match at batch[${k}], ` +
             `returning ${newSlice.length} new messages ` +
             `(storedCount=${storedMessageCount} batchLen=${batch.length})`,
@@ -5788,7 +5788,7 @@ export class LcmContextEngine implements ContextEngine {
               tokenBudget: cappedTokenBudget,
               debtReason: maintenance.reason,
             })) {
-            this.deps.log.info(
+            this.deps.log.debug(
               `[lcm] maintain: deferred compaction debt still hot-cache deferred conversation=${conversation.conversationId} ${sessionLabel} retention=${telemetry?.retention ?? "null"} lastCacheTouchAt=${telemetry?.lastCacheTouchAt?.toISOString() ?? "null"}`,
             );
           } else {
@@ -5803,7 +5803,7 @@ export class LcmContextEngine implements ContextEngine {
             });
           }
         } else if (maintenance?.pending || maintenance?.running) {
-          this.deps.log.info(
+          this.deps.log.debug(
             `[lcm] maintain: deferred compaction debt pending conversation=${conversation.conversationId} ${sessionLabel} but host runtimeContext.allowDeferredCompactionExecution is disabled`,
           );
         }
@@ -5836,7 +5836,7 @@ export class LcmContextEngine implements ContextEngine {
           { limit: TRANSCRIPT_GC_BATCH_SIZE },
         );
         if (candidates.length === 0) {
-          this.deps.log.info(
+          this.deps.log.debug(
             `[lcm] maintain: no transcript GC candidates conversation=${conversation.conversationId} ${sessionLabel} duration=${formatDurationMs(Date.now() - startedAt)}`,
           );
           return deferredCompactionResult ?? {
@@ -5874,7 +5874,7 @@ export class LcmContextEngine implements ContextEngine {
         }
 
         if (replacements.length === 0) {
-          this.deps.log.info(
+          this.deps.log.debug(
             `[lcm] maintain: no matching transcript entries conversation=${conversation.conversationId} ${sessionLabel} candidates=${candidates.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
           );
           return deferredCompactionResult ?? {
@@ -5912,7 +5912,7 @@ export class LcmContextEngine implements ContextEngine {
             }
           : result;
 
-        this.deps.log.info(
+        this.deps.log.debug(
           `[lcm] maintain: done conversation=${conversation.conversationId} ${sessionLabel} candidates=${candidates.length} replacements=${replacements.length} changed=${combinedResult.changed} rewrittenEntries=${combinedResult.rewrittenEntries} bytesFreed=${combinedResult.bytesFreed} duration=${formatDurationMs(Date.now() - startedAt)}`,
         );
         return combinedResult;
@@ -6310,7 +6310,7 @@ export class LcmContextEngine implements ContextEngine {
       summaryDedupedNewMessages.push(...dedupedNewMessages);
     }
     if (summaryCoveredMessages.length > 0) {
-      this.deps.log.info(
+      this.deps.log.debug(
         `[lcm] afterTurn: skipped ${summaryCoveredMessages.length} messages already covered by autoCompactionSummary ${sessionLabel}`,
       );
     }
@@ -6332,7 +6332,7 @@ export class LcmContextEngine implements ContextEngine {
       // afterTurn's dedup ran. Log and fall through to compaction evaluation
       // rather than early-returning, otherwise compaction would never fire
       // once dedup begins consistently swallowing new turn deltas.
-      this.deps.log.info(
+      this.deps.log.debug(
         `[lcm] afterTurn: nothing to ingest ${sessionLabel} newMessages=${newMessages.length} (continuing to compaction evaluation; transcript reconcile may have already ingested) duration=${formatDurationMs(Date.now() - startedAt)}`,
       );
     } else {
@@ -6438,7 +6438,7 @@ export class LcmContextEngine implements ContextEngine {
       sessionKey: params.sessionKey,
     });
     if (!conversation) {
-      this.deps.log.info(
+      this.deps.log.debug(
         `[lcm] afterTurn: conversation lookup missed ${sessionLabel} ingestBatch=${ingestBatch.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
       );
       await runRuntimeAutoRotate();
@@ -6573,7 +6573,7 @@ export class LcmContextEngine implements ContextEngine {
           // every afterTurn that records deferred debt.
           if (!this.cacheContextUnknownLogged.has(conversation.conversationId)) {
             this.cacheContextUnknownLogged.add(conversation.conversationId);
-            this.deps.log.info(
+            this.deps.log.debug(
               `[lcm] background deferred compaction scheduled without cache context conversation=${conversation.conversationId} ${sessionLabel} reason=cache-context-unknown debtReason=${deferredReason}`,
             );
           }
@@ -6605,7 +6605,7 @@ export class LcmContextEngine implements ContextEngine {
       });
     }
 
-    this.deps.log.info(
+    this.deps.log.debug(
       `[lcm] afterTurn: done conversation=${conversation.conversationId} ${sessionLabel} newMessages=${newMessages.length} dedupedMessages=${dedupedNewMessages.length} ingestedMessages=${ingestBatch.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
     );
     await runRuntimeAutoRotate();
@@ -6645,7 +6645,7 @@ export class LcmContextEngine implements ContextEngine {
         sessionKey: params.sessionKey,
       });
       if (!conversation) {
-        this.deps.log.info(
+        this.deps.log.debug(
           `[lcm] assemble: conversation lookup missed ${sessionLabel} duration=${formatDurationMs(Date.now() - startedAt)}`,
         );
         return safeFallback();
@@ -6691,7 +6691,7 @@ export class LcmContextEngine implements ContextEngine {
 
       const contextItems = await this.summaryStore.getContextItems(conversation.conversationId);
       if (contextItems.length === 0) {
-        this.deps.log.info(
+        this.deps.log.debug(
           `[lcm] assemble: no context items conversation=${conversation.conversationId} ${sessionLabel} duration=${formatDurationMs(Date.now() - startedAt)}`,
         );
         return safeFallback();
@@ -6702,7 +6702,7 @@ export class LcmContextEngine implements ContextEngine {
       // the live path to avoid dropping prompt context.
       const hasSummaryItems = contextItems.some((item) => item.itemType === "summary");
       if (!hasSummaryItems && contextItems.length < params.messages.length) {
-        this.deps.log.info(
+        this.deps.log.debug(
           `[lcm] assemble: falling back to live context conversation=${conversation.conversationId} ${sessionLabel} contextItems=${contextItems.length} liveMessages=${params.messages.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
         );
         return safeFallback();
@@ -6727,7 +6727,7 @@ export class LcmContextEngine implements ContextEngine {
       // If assembly produced no messages for a non-empty live session,
       // fail safe to the live context.
       if (assembled.messages.length === 0 && params.messages.length > 0) {
-        this.deps.log.info(
+        this.deps.log.debug(
           `[lcm] assemble: empty assembled output, using live context conversation=${conversation.conversationId} ${sessionLabel} contextItems=${contextItems.length} tokenBudget=${tokenBudget} duration=${formatDurationMs(Date.now() - startedAt)}`,
         );
         return safeFallback();
@@ -6740,7 +6740,7 @@ export class LcmContextEngine implements ContextEngine {
       // every stored message is role "assistant" or "toolResult".
       const assembledHasUserTurn = assembled.messages.some((m) => m.role === "user");
       if (!assembledHasUserTurn && params.messages.length > 0) {
-        this.deps.log.info(
+        this.deps.log.debug(
           `[lcm] assemble: assembled context has no user turns, falling back to live context to prevent prefill errors conversation=${conversation.conversationId} ${sessionLabel} assembledMessages=${assembled.messages.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
         );
         // Use safeFallback() so the result is a *new* array; otherwise the
@@ -6751,7 +6751,7 @@ export class LcmContextEngine implements ContextEngine {
         return safeFallback();
       }
 
-      this.deps.log.info(
+      this.deps.log.debug(
         `[lcm] assemble: done conversation=${conversation.conversationId} ${sessionLabel} contextItems=${contextItems.length} hasSummaryItems=${hasSummaryItems} inputMessages=${params.messages.length} outputMessages=${assembled.messages.length} tokenBudget=${tokenBudget} estimatedTokens=${assembled.estimatedTokens} duration=${formatDurationMs(Date.now() - startedAt)}`,
       );
       const prefixChange = describeAssembledPrefixChange(
@@ -6779,7 +6779,7 @@ export class LcmContextEngine implements ContextEngine {
               ),
             })}`
           : "";
-        this.deps.log.info(
+        this.deps.log.debug(
           `[lcm] assemble-debug conversation=${conversation.conversationId} ${sessionLabel} cacheAwareState=${cacheAwareState} messagesHash=${assembled.debug.finalMessagesHash} preSanitizeHash=${assembled.debug.preSanitizeMessagesHash} previousAssembledCount=${prefixChange.previousCount} commonPrefixCount=${prefixChange.commonPrefixCount} commonPrefixHash=${prefixChange.commonPrefixHash} previousWasPrefix=${prefixChange.previousWasPrefix} firstDivergenceIndex=${prefixChange.firstDivergenceIndex} previousDivergenceMessage=${prefixChange.previousDivergenceMessage} currentDivergenceMessage=${prefixChange.currentDivergenceMessage} evictableCount=${assembled.debug.preSanitizeEvictableCount} evictableHash=${assembled.debug.preSanitizeEvictableHash} freshTailSegmentCount=${assembled.debug.preSanitizeFreshTailCount} freshTailSegmentHash=${assembled.debug.preSanitizeFreshTailHash} selectionMode=${assembled.debug.selectionMode} freshTailOrdinal=${assembled.debug.freshTailOrdinal} orphanStrippingOrdinal=${assembled.debug.orphanStrippingOrdinal} baseFreshTailCount=${assembled.debug.baseFreshTailCount} freshTailCount=${assembled.debug.freshTailCount} tailTokens=${assembled.debug.tailTokens} remainingBudget=${assembled.debug.remainingBudget} evictableTotalTokens=${assembled.debug.evictableTotalTokens} promotedToolResults=${assembled.debug.promotedToolResultCount} promotedOrdinals=${promotedOrdinals} removedToolUseBlocks=${assembled.debug.removedToolUseBlockCount} touchedAssistantMessages=${assembled.debug.touchedAssistantMessageCount}${overflowDiagnostics}`,
         );
       }
@@ -6790,7 +6790,7 @@ export class LcmContextEngine implements ContextEngine {
       };
       return result;
     } catch (err) {
-      this.deps.log.info(
+      this.deps.log.debug(
         `[lcm] assemble: failed for session=${params.sessionId}${params.sessionKey?.trim() ? ` sessionKey=${params.sessionKey.trim()}` : ""} error=${describeLogError(err)}`,
       );
       return safeFallback();
@@ -6884,7 +6884,7 @@ export class LcmContextEngine implements ContextEngine {
         && params.leafChunkTokens > 0
         ? Math.floor(params.leafChunkTokens)
         : fallbackLeafChunkTokens[0];
-    this.deps.log.info(
+    this.deps.log.debug(
       `[lcm] compactLeafAsync start: conversation=${params.conversationId} session=${params.sessionId} leafChunkTokens=${activeLeafChunkTokens ?? "null"} fallbackLeafChunkTokens=${fallbackLeafChunkTokens.join(",")} maxPasses=${maxPasses} activityBand=${params.activityBand ?? "unknown"} allowCondensedPasses=${params.allowCondensedPasses !== false}`,
     );
 

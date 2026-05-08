@@ -4855,6 +4855,7 @@ describe("LcmContextEngine.bootstrap", () => {
 
   it("skips full read when file is unchanged and conversation is already bootstrapped", async () => {
     const infoLog = vi.fn();
+    const debugLog = vi.fn();
     const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-engine-"));
     tempDirs.push(tempDir);
     const dbPath = join(tempDir, "lcm.db");
@@ -4877,7 +4878,7 @@ describe("LcmContextEngine.bootstrap", () => {
           info: infoLog,
           warn: vi.fn(),
           error: vi.fn(),
-          debug: vi.fn(),
+          debug: debugLog,
         },
       }),
       db,
@@ -4919,14 +4920,14 @@ describe("LcmContextEngine.bootstrap", () => {
     });
 
     // Verify the cache guard fired (skipped full read)
-    const cacheGuardLogs = infoLog.mock.calls.filter(
+    const cacheGuardLogs = debugLog.mock.calls.filter(
       (call: unknown[]) =>
         typeof call[0] === "string" && call[0].includes("skipped full read (file unchanged)"),
     );
     expect(cacheGuardLogs).toHaveLength(1);
 
     // Verify only one full transcript read occurred (the first bootstrap)
-    const fullReadLogs = infoLog.mock.calls.filter(
+    const fullReadLogs = debugLog.mock.calls.filter(
       (call: unknown[]) => typeof call[0] === "string" && call[0].includes("full transcript read"),
     );
     expect(fullReadLogs).toHaveLength(1);
@@ -4934,6 +4935,7 @@ describe("LcmContextEngine.bootstrap", () => {
 
   it("file-level cache guard allows full read when file changes", async () => {
     const infoLog = vi.fn();
+    const debugLog = vi.fn();
     const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-engine-"));
     tempDirs.push(tempDir);
     const dbPath = join(tempDir, "lcm.db");
@@ -4955,7 +4957,7 @@ describe("LcmContextEngine.bootstrap", () => {
           info: infoLog,
           warn: vi.fn(),
           error: vi.fn(),
-          debug: vi.fn(),
+          debug: debugLog,
         },
       }),
       db,
@@ -4991,13 +4993,13 @@ describe("LcmContextEngine.bootstrap", () => {
     expect(second.importedMessages).toBeGreaterThanOrEqual(1);
 
     // Two full reads should have occurred
-    const fullReadLogs = infoLog.mock.calls.filter(
+    const fullReadLogs = debugLog.mock.calls.filter(
       (call: unknown[]) => typeof call[0] === "string" && call[0].includes("full transcript read"),
     );
     expect(fullReadLogs).toHaveLength(2);
 
     // And the cache guard must not have fired after the file grew
-    const skippedLogs = infoLog.mock.calls.filter(
+    const skippedLogs = debugLog.mock.calls.filter(
       (call: unknown[]) =>
         typeof call[0] === "string" && call[0].includes("skipped full read (file unchanged)"),
     );
@@ -5576,13 +5578,13 @@ describe("LcmContextEngine.assemble canonical path", () => {
   });
 
   it("logs previous and current divergence message summaries when assembled prefixes change", async () => {
-    const infoLog = vi.fn();
+    const debugLog = vi.fn();
     const engine = createEngineWithDepsOverrides({
       log: {
-        info: infoLog,
+        info: vi.fn(),
         warn: vi.fn(),
         error: vi.fn(),
-        debug: vi.fn(),
+        debug: debugLog,
       },
     });
     const sessionId = "session-prefix-divergence-debug";
@@ -5614,7 +5616,7 @@ describe("LcmContextEngine.assemble canonical path", () => {
       tokenBudget: 10_000,
     });
 
-    const assembleDebugLog = infoLog.mock.calls
+    const assembleDebugLog = debugLog.mock.calls
       .map((call: unknown[]) => call[0])
       .find(
         (entry: unknown) =>
@@ -5631,13 +5633,13 @@ describe("LcmContextEngine.assemble canonical path", () => {
   });
 
   it("adds compact overflow diagnostics to stressed assemble debug logs", async () => {
-    const infoLog = vi.fn();
+    const debugLog = vi.fn();
     const engine = createEngineWithDepsOverrides({
       log: {
-        info: infoLog,
+        info: vi.fn(),
         warn: vi.fn(),
         error: vi.fn(),
-        debug: vi.fn(),
+        debug: debugLog,
       },
     });
     const sessionId = "session-overflow-diagnostics";
@@ -5680,7 +5682,7 @@ describe("LcmContextEngine.assemble canonical path", () => {
       tokenBudget: 100,
     });
 
-    const assembleDebugLog = infoLog.mock.calls
+    const assembleDebugLog = debugLog.mock.calls
       .map((call: unknown[]) => call[0])
       .find(
         (entry: unknown) =>
@@ -7624,10 +7626,11 @@ describe("LcmContextEngine fidelity and token budget", () => {
     // and debt accumulated forever. Now we always schedule and let the inner
     // cache-aware gate decide.
     const infoLog = vi.fn();
+    const debugLog = vi.fn();
     const engine = createEngineWithDeps(
       {},
       {
-        log: { info: infoLog, warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+        log: { info: infoLog, warn: vi.fn(), error: vi.fn(), debug: debugLog },
       },
     );
     const sessionId = "after-turn-cli-backend-no-cache-context";
@@ -7677,14 +7680,14 @@ describe("LcmContextEngine fidelity and token budget", () => {
 
     // The new visibility log should be emitted, not the legacy "not
     // scheduled" message.
-    const infoMessages = infoLog.mock.calls.map((c) => String(c[0]));
+    const debugMessages = debugLog.mock.calls.map((c) => String(c[0]));
     expect(
-      infoMessages.some((m) =>
+      debugMessages.some((m) =>
         m.includes("scheduled without cache context") && m.includes("cache-context-unknown"),
       ),
     ).toBe(true);
     expect(
-      infoMessages.some((m) => m.includes("background deferred compaction not scheduled")),
+      debugMessages.some((m) => m.includes("background deferred compaction not scheduled")),
     ).toBe(false);
 
     // And debt is still recorded — that part was already correct.
@@ -7704,6 +7707,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
     // refreshes the checkpoint, and subsequent afterTurns take the
     // incremental path or the cap branch.
     const infoLog = vi.fn();
+    const debugLog = vi.fn();
     const warnLog = vi.fn();
     const engine = createEngineWithDeps(
       {},
@@ -7749,7 +7753,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
     // log, since readLeafPathMessages is a free function. The slow-path warn
     // is the canonical signal that the full re-read happened.
     warnLog.mockClear();
-    infoLog.mockClear();
+    debugLog.mockClear();
 
     // First call with a different sessionFile triggers the slow path.
     // Pre-populate the target sessionFile with at least one historical
@@ -7782,7 +7786,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
     // (e.g. checkpoint not append-only-eligible), the cap log fires instead
     // of a second full re-read.
     warnLog.mockClear();
-    infoLog.mockClear();
+    debugLog.mockClear();
     await engine.afterTurn({
       sessionId,
       sessionFile: targetSessionFile,
@@ -7798,6 +7802,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
 
   it("afterTurn retries a capped reconcile when the transcript file changed with an append-only-ineligible suffix (F7)", async () => {
     const infoLog = vi.fn();
+    const debugLog = vi.fn();
     const warnLog = vi.fn();
     const engine = createEngineWithDeps(
       {},
@@ -7846,7 +7851,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
     );
 
     warnLog.mockClear();
-    infoLog.mockClear();
+    debugLog.mockClear();
     await engine.afterTurn({
       sessionId,
       sessionFile: targetSessionFile,
@@ -7872,7 +7877,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
     );
 
     warnLog.mockClear();
-    infoLog.mockClear();
+    debugLog.mockClear();
     await engine.afterTurn({
       sessionId,
       sessionFile: targetSessionFile,
@@ -9423,6 +9428,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
 
   it("evaluateIncrementalCompaction skips hot-cache maintenance when real budget headroom is comfortable", async () => {
     const infoLog = vi.fn();
+    const debugLog = vi.fn();
     const engine = createEngineWithDeps(
       {},
       {
@@ -9430,7 +9436,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
           info: infoLog,
           warn: vi.fn(),
           error: vi.fn(),
-          debug: vi.fn(),
+          debug: debugLog,
         },
       },
     );
@@ -9494,31 +9500,32 @@ describe("LcmContextEngine fidelity and token budget", () => {
     expect(decision.shouldCompact).toBe(false);
     expect(decision.cacheState).toBe("hot");
     expect(decision.leafChunkTokens).toBe(40_000);
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("reason=hot-cache-budget-headroom"),
     );
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("tokenBudget=100000"),
     );
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("currentTokenCount=10000"),
     );
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("cacheRead=2048"),
     );
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("cacheWrite=null"),
     );
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("cachePromptTokenCount=10000"),
     );
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("cacheReadSharePct=20.5%"),
     );
   });
 
   it("evaluateIncrementalCompaction treats low cache-read share as cold even when telemetry says hot", async () => {
     const infoLog = vi.fn();
+    const debugLog = vi.fn();
     const engine = createEngineWithDeps(
       {},
       {
@@ -9526,7 +9533,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
           info: infoLog,
           warn: vi.fn(),
           error: vi.fn(),
-          debug: vi.fn(),
+          debug: debugLog,
         },
       },
     );
@@ -9593,16 +9600,17 @@ describe("LcmContextEngine fidelity and token budget", () => {
     expect(decision.cacheState).toBe("cold");
     expect(decision.maxPasses).toBe(2);
     expect(decision.allowCondensedPasses).toBe(true);
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("reason=cold-cache-catchup"),
     );
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("cacheReadSharePct=15.0%"),
     );
   });
 
   it("evaluateIncrementalCompaction keeps cache-write-only telemetry hot", async () => {
     const infoLog = vi.fn();
+    const debugLog = vi.fn();
     const engine = createEngineWithDeps(
       {},
       {
@@ -9610,7 +9618,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
           info: infoLog,
           warn: vi.fn(),
           error: vi.fn(),
-          debug: vi.fn(),
+          debug: debugLog,
         },
       },
     );
@@ -9676,19 +9684,20 @@ describe("LcmContextEngine fidelity and token budget", () => {
     expect(decision.shouldCompact).toBe(false);
     expect(decision.cacheState).toBe("hot");
     expect(decision.allowCondensedPasses).toBe(false);
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("reason=hot-cache-budget-headroom"),
     );
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("cacheReadSharePct=0.0%"),
     );
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("cacheWrite=8000"),
     );
   });
 
   it("evaluateIncrementalCompaction scales budget-trigger passes by prompt overage", async () => {
     const infoLog = vi.fn();
+    const debugLog = vi.fn();
     const engine = createEngineWithDeps(
       {},
       {
@@ -9696,7 +9705,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
           info: infoLog,
           warn: vi.fn(),
           error: vi.fn(),
-          debug: vi.fn(),
+          debug: debugLog,
         },
       },
     );
@@ -9763,16 +9772,17 @@ describe("LcmContextEngine fidelity and token budget", () => {
     expect(decision.leafChunkTokens).toBe(40_000);
     expect(decision.maxPasses).toBe(4);
     expect(decision.allowCondensedPasses).toBe(true);
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("reason=budget-trigger"),
     );
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("maxPasses=4"),
     );
   });
 
   it("evaluateIncrementalCompaction keeps hot-cache hysteresis for a recent cache hit", async () => {
     const infoLog = vi.fn();
+    const debugLog = vi.fn();
     const engine = createEngineWithDeps(
       {},
       {
@@ -9780,7 +9790,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
           info: infoLog,
           warn: vi.fn(),
           error: vi.fn(),
-          debug: vi.fn(),
+          debug: debugLog,
         },
       },
     );
@@ -9843,13 +9853,14 @@ describe("LcmContextEngine fidelity and token budget", () => {
 
     expect(decision.shouldCompact).toBe(false);
     expect(decision.cacheState).toBe("hot");
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("reason=hot-cache-budget-headroom"),
     );
   });
 
   it("evaluateIncrementalCompaction lets low cache-read share override hot-cache hysteresis", async () => {
     const infoLog = vi.fn();
+    const debugLog = vi.fn();
     const engine = createEngineWithDeps(
       {},
       {
@@ -9857,7 +9868,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
           info: infoLog,
           warn: vi.fn(),
           error: vi.fn(),
-          debug: vi.fn(),
+          debug: debugLog,
         },
       },
     );
@@ -9923,13 +9934,14 @@ describe("LcmContextEngine fidelity and token budget", () => {
     expect(decision.shouldCompact).toBe(true);
     expect(decision.cacheState).toBe("cold");
     expect(decision.maxPasses).toBe(2);
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("reason=cold-cache-catchup"),
     );
   });
 
   it("evaluateIncrementalCompaction treats a single cold reading as non-authoritative when the session was previously hot", async () => {
     const infoLog = vi.fn();
+    const debugLog = vi.fn();
     const engine = createEngineWithDeps(
       {},
       {
@@ -9937,7 +9949,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
           info: infoLog,
           warn: vi.fn(),
           error: vi.fn(),
-          debug: vi.fn(),
+          debug: debugLog,
         },
       },
     );
@@ -10000,13 +10012,14 @@ describe("LcmContextEngine fidelity and token budget", () => {
 
     expect(decision.shouldCompact).toBe(false);
     expect(decision.cacheState).toBe("hot");
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("reason=hot-cache-budget-headroom"),
     );
   });
 
   it("evaluateIncrementalCompaction eventually treats repeated cold readings as authoritative", async () => {
     const infoLog = vi.fn();
+    const debugLog = vi.fn();
     const engine = createEngineWithDeps(
       {},
       {
@@ -10014,7 +10027,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
           info: infoLog,
           warn: vi.fn(),
           error: vi.fn(),
-          debug: vi.fn(),
+          debug: debugLog,
         },
       },
     );
@@ -10079,13 +10092,14 @@ describe("LcmContextEngine fidelity and token budget", () => {
     expect(decision.shouldCompact).toBe(true);
     expect(decision.cacheState).toBe("cold");
     expect(decision.maxPasses).toBe(2);
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("reason=cold-cache-catchup"),
     );
   });
 
   it("evaluateIncrementalCompaction keeps hot-cache protection for unknown observations without an explicit break", async () => {
     const infoLog = vi.fn();
+    const debugLog = vi.fn();
     const engine = createEngineWithDeps(
       {},
       {
@@ -10093,7 +10107,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
           info: infoLog,
           warn: vi.fn(),
           error: vi.fn(),
-          debug: vi.fn(),
+          debug: debugLog,
         },
       },
     );
@@ -10156,7 +10170,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
 
     expect(decision.shouldCompact).toBe(false);
     expect(decision.cacheState).toBe("hot");
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("reason=hot-cache-budget-headroom"),
     );
   });
@@ -10244,6 +10258,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
 
   it("afterTurn increases the working leaf chunk target for busy sessions when dynamic sizing is enabled", async () => {
     const infoLog = vi.fn();
+    const debugLog = vi.fn();
     const engine = createEngineWithDeps(
       {
         proactiveThresholdCompactionMode: "inline",
@@ -10257,7 +10272,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
           info: infoLog,
           warn: vi.fn(),
           error: vi.fn(),
-          debug: vi.fn(),
+          debug: debugLog,
         },
       },
     );
@@ -10319,10 +10334,10 @@ describe("LcmContextEngine fidelity and token budget", () => {
         }),
       );
     });
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("activityBand=high"),
     );
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("preferredLeafChunkTokens=40000"),
     );
   });
@@ -10583,12 +10598,13 @@ describe("LcmContextEngine fidelity and token budget", () => {
 
   it("afterTurn prunes heartbeat-shaped ACK turns before compaction even without the heartbeat flag", async () => {
     const infoLog = vi.fn();
+    const debugLog = vi.fn();
     const engine = createEngineWithDepsOverrides({
       log: {
         info: infoLog,
         warn: vi.fn(),
         error: vi.fn(),
-        debug: vi.fn(),
+        debug: debugLog,
       },
     });
     const sessionId = "after-turn-heartbeat-prune";
@@ -11140,6 +11156,7 @@ describe("LcmContextEngine afterTurn dedup guard", () => {
 describe("LcmContextEngine compaction telemetry", () => {
   it("does not append synthetic system messages for compaction passes", async () => {
     const infoLog = vi.fn();
+    const debugLog = vi.fn();
     const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-engine-"));
     tempDirs.push(tempDir);
     const config = createTestConfig(join(tempDir, "lcm.db"));
@@ -11158,7 +11175,7 @@ describe("LcmContextEngine compaction telemetry", () => {
             info: infoLog,
             warn: vi.fn(),
             error: vi.fn(),
-            debug: vi.fn(),
+            debug: debugLog,
           },
         },
       ),
@@ -11255,8 +11272,9 @@ describe("LcmContextEngine compaction telemetry", () => {
     expect(compactLeafSpy).toHaveBeenCalledTimes(2);
   });
 
-  it("compactLeafAsync logs cache-aware start details at info", async () => {
+  it("compactLeafAsync logs cache-aware start details at debug", async () => {
     const infoLog = vi.fn();
+    const debugLog = vi.fn();
     const engine = createEngineWithDeps(
       {},
       {
@@ -11264,7 +11282,7 @@ describe("LcmContextEngine compaction telemetry", () => {
           info: infoLog,
           warn: vi.fn(),
           error: vi.fn(),
-          debug: vi.fn(),
+          debug: debugLog,
         },
       },
     );
@@ -11301,16 +11319,16 @@ describe("LcmContextEngine compaction telemetry", () => {
     });
 
     expect(result.compacted).toBe(true);
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("[lcm] compactLeafAsync start:"),
     );
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("leafChunkTokens=40000"),
     );
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("fallbackLeafChunkTokens=40000,30000,20000"),
     );
-    expect(infoLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("activityBand=medium"),
     );
   });

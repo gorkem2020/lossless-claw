@@ -1401,7 +1401,7 @@ export async function createLcmSummarizeFromLegacyParams(params: {
               failure: directResponseFailure,
             });
           }
-          params.deps.log.info(
+          params.deps.log.debug(
             `[lcm] summarizer auth retry succeeded; provider=${provider}; model=${model}; source=direct-credentials`,
           );
           return directResult;
@@ -1528,7 +1528,7 @@ export async function createLcmSummarizeFromLegacyParams(params: {
         if (envelopeNormalized.summary) {
           summary = envelopeNormalized.summary;
           summarySource = "envelope";
-          params.deps.log.info(
+          params.deps.log.debug(
             `[lcm] recovered summary from response envelope; provider=${provider}; model=${model}; ` +
               `block_types=${formatBlockTypes(envelopeNormalized.blockTypes)}; source=envelope`,
           );
@@ -1571,7 +1571,7 @@ export async function createLcmSummarizeFromLegacyParams(params: {
 
           if (summary) {
             summarySource = "retry";
-            params.deps.log.info(
+            params.deps.log.debug(
               `[lcm] retry succeeded; provider=${provider}; model=${model}; ` +
                 `block_types=${formatBlockTypes(retryEnvelopeNormalized.blockTypes)}; source=retry`,
             );
@@ -1647,7 +1647,7 @@ export async function createLcmSummarizeFromLegacyParams(params: {
       }
 
       if (summarySource !== "content") {
-        params.deps.log.info(
+        params.deps.log.debug(
           `[lcm] summary resolved via non-content path; provider=${provider}; model=${model}; source=${summarySource}`,
         );
       }

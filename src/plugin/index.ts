@@ -2420,7 +2420,7 @@ const lcmPlugin = {
     // when the same DB path is already initialized.
     const existingInit = getSharedInit(normalizedDbPath);
     if (existingInit && !existingInit.stopped) {
-      deps.log.info(`[lcm] Reusing shared engine init for db=${normalizedDbPath}`);
+      deps.log.debug(`[lcm] Reusing shared engine init for db=${normalizedDbPath}`);
       wirePluginHandlers(api, deps, existingInit);
       return;
     }

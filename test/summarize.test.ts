@@ -84,7 +84,7 @@ function getMockLogText(mockFn: unknown): string {
 
 function getDepsLogText(
   deps: LcmDependencies,
-  levels: Array<keyof LcmDependencies["log"]> = ["warn", "error", "info"],
+  levels: Array<keyof LcmDependencies["log"]> = ["warn", "error", "info", "debug"],
 ): string {
   return levels
     .map((level) => getMockLogText(deps.log[level]))
