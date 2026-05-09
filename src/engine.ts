@@ -3394,7 +3394,10 @@ export class LcmContextEngine implements ContextEngine {
     }
 
     const { summarize, summaryModel, breakerKey } = await this.resolveSummarize({
-      legacyParams,
+      legacyParams: this.buildSummarizerLegacyParams({
+        legacyParams,
+        sessionKey: params.sessionKey,
+      }),
       customInstructions: params.customInstructions,
       breakerScope: this.resolveSessionQueueKey(params.sessionId, params.sessionKey),
     });
@@ -3598,6 +3601,22 @@ export class LcmContextEngine implements ContextEngine {
     return parts.join(" ");
   }
 
+  /** Attach session identity to summarizer params without mutating host runtimeContext objects. */
+  private buildSummarizerLegacyParams(params: {
+    legacyParams?: Record<string, unknown>;
+    sessionKey?: string;
+  }): Record<string, unknown> | undefined {
+    const trimmedSessionKey = params.sessionKey?.trim();
+    if (!params.legacyParams && !trimmedSessionKey) {
+      return undefined;
+    }
+    const next = { ...(params.legacyParams ?? {}) };
+    if (trimmedSessionKey && typeof next.sessionKey !== "string") {
+      next.sessionKey = trimmedSessionKey;
+    }
+    return next;
+  }
+
   /** Build a summarize callback with runtime provider fallback handling. */
   private async resolveSummarize(params: {
     legacyParams?: Record<string, unknown>;
@@ -3666,7 +3685,12 @@ export class LcmContextEngine implements ContextEngine {
     try {
       const result = await createLcmSummarizeFromLegacyParams({
         deps: this.deps,
-        legacyParams: { provider, model },
+        legacyParams: {
+          provider,
+          model,
+          modelConfigField: "largeFileSummaryModel",
+          modelConfigPath: "plugins.entries.lossless-claw.config.largeFileSummaryModel",
+        },
         customInstructions: this.config.customInstructions || undefined,
       });
       if (!result) {
@@ -6854,7 +6878,10 @@ export class LcmContextEngine implements ContextEngine {
         ).currentTokenCount,
     );
     const { summarize, summaryModel, breakerKey } = await this.resolveSummarize({
-      legacyParams,
+      legacyParams: this.buildSummarizerLegacyParams({
+        legacyParams,
+        sessionKey: params.sessionKey,
+      }),
       customInstructions: params.customInstructions,
       breakerScope: this.resolveSessionQueueKey(params.sessionId, params.sessionKey),
     });
