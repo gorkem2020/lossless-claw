@@ -117,7 +117,7 @@ describe("createLcmDependencies.complete runtime.llm bridge", () => {
     vi.clearAllMocks();
   });
 
-  it("delegates model dispatch and auth to api.runtime.llm.complete", async () => {
+  it("delegates model dispatch and auth to api.runtime.llm.complete without target-agent override", async () => {
     const runtimeLlmComplete = vi.fn(async () => ({
       text: "summary output",
       provider: "openai-codex",
@@ -154,7 +154,6 @@ describe("createLcmDependencies.complete runtime.llm bridge", () => {
         temperature: 0.2,
         systemPrompt: "System summary policy.",
         purpose: "lossless-claw compaction summarization",
-        agentId: "research-agent",
       });
       expect(result).toMatchObject({
         content: [{ type: "text", text: "summary output" }],
@@ -163,6 +162,34 @@ describe("createLcmDependencies.complete runtime.llm bridge", () => {
         agentId: "research-agent",
         request_api: "runtime.llm",
       });
+    } finally {
+      closeLcmConnection(dbPath);
+    }
+  });
+
+
+  it("omits agentId for plugin-wide runtime llm even when deps.complete receives one", async () => {
+    const runtimeLlmComplete = vi.fn(async () => ({
+      text: "summary output",
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+      agentId: "main",
+    }));
+    const { api, getFactory, dbPath } = buildApi({ runtimeLlmComplete });
+    const engine = getRegisteredEngine(api, getFactory);
+
+    try {
+      await engine.deps.complete({
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+        agentId: "research-agent",
+        messages: [{ role: "user", content: "Summarize this." }],
+        maxTokens: 256,
+      });
+
+      expect(runtimeLlmComplete).toHaveBeenCalledWith(
+        expect.not.objectContaining({ agentId: expect.any(String) }),
+      );
     } finally {
       closeLcmConnection(dbPath);
     }
@@ -189,12 +216,16 @@ describe("createLcmDependencies.complete runtime.llm bridge", () => {
         provider: "anthropic",
         model: "claude-sonnet-4-6",
         runtimeLlmComplete: boundRuntimeLlmComplete,
+        agentId: "research",
         messages: [{ role: "user", content: "Summarize this." }],
         maxTokens: 256,
       });
 
       expect(boundRuntimeLlmComplete).toHaveBeenCalledTimes(1);
       expect(pluginRuntimeLlmComplete).not.toHaveBeenCalled();
+      expect(boundRuntimeLlmComplete).toHaveBeenCalledWith(
+        expect.objectContaining({ agentId: "research" }),
+      );
       expect(result).toMatchObject({
         content: [{ type: "text", text: "bound summary" }],
         agentId: "research",

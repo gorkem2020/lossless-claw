@@ -493,6 +493,31 @@ describe("createLcmSummarizeFromLegacyParams", () => {
     expect(Object.prototype.hasOwnProperty.call(completeArgs, "authProfileId")).toBe(false);
   });
 
+
+  it("does not derive agentId for plugin-wide runtime completion from sessionKey", async () => {
+    const deps = makeDeps({
+      parseAgentSessionKey: vi.fn(() => ({
+        agentId: "research",
+        suffix: "session:abc",
+      })),
+    });
+
+    const summarize = await createSummarizeFn({
+      deps,
+      legacyParams: {
+        provider: "anthropic",
+        model: "claude-opus-4-5",
+        sessionKey: "agent:research:session:abc",
+      },
+    });
+
+    await summarize!("Summary input");
+
+    expect(vi.mocked(deps.complete).mock.calls[0]?.[0]).not.toMatchObject({
+      agentId: expect.any(String),
+    });
+  });
+
   it("passes host-bound runtime llm completion from context engine params", async () => {
     const runtimeLlmComplete = vi.fn(async () => ({
       text: "bound summary",

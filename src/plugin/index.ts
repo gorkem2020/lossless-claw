@@ -1043,6 +1043,7 @@ function createLcmDependencies(
       const modelId = model.trim();
       const modelRef = runtimeModelOverride?.modelRef.trim();
       const runtimeLlm = runtimeLlmComplete ?? getRuntimeLlm(api)?.complete;
+      const isBoundRuntimeLlm = !!runtimeLlmComplete;
       const requestMetadata = {
         request_provider: providerId ?? "(runtime)",
         request_model: modelId || "(runtime)",
@@ -1075,7 +1076,10 @@ function createLcmDependencies(
             : {}),
           ...(typeof system === "string" && system.trim() ? { systemPrompt: system.trim() } : {}),
           purpose: "lossless-claw compaction summarization",
-          ...(agentId?.trim() ? { agentId: agentId.trim() } : {}),
+          // Only context-engine supplied runtime LLM capabilities may carry an explicit
+          // agentId. Plugin-wide api.runtime.llm.complete is gateway-scoped and rejects
+          // target-agent overrides unless OpenClaw is explicitly configured otherwise.
+          ...(isBoundRuntimeLlm && agentId?.trim() ? { agentId: agentId.trim() } : {}),
         });
         const text = typeof result.text === "string" ? result.text : "";
         return {

@@ -1292,6 +1292,10 @@ export async function createLcmSummarizeFromLegacyParams(params: {
       : undefined;
   const agentId = explicitAgentId || sessionAgentId;
   const runtimeLlmComplete = readRuntimeLlmComplete(params.legacyParams);
+  // OpenClaw only permits agentId override on host-bound/context-engine runtime LLM
+  // capabilities. Plugin-wide api.runtime.llm.complete is already scoped by the
+  // gateway and rejects unbound agentId overrides.
+  const shouldPassAgentId = !!runtimeLlmComplete && !!agentId;
 
   const condensedTargetTokens =
     Number.isFinite(params.deps.config.condensedTargetTokens) &&
@@ -1363,7 +1367,7 @@ export async function createLcmSummarizeFromLegacyParams(params: {
           model,
           ...(runtimeModelOverride ? { runtimeModelOverride } : {}),
           ...(runtimeLlmComplete ? { runtimeLlmComplete } : {}),
-          ...(agentId ? { agentId } : {}),
+          ...(shouldPassAgentId ? { agentId } : {}),
           system: LCM_SUMMARIZER_SYSTEM_PROMPT,
           messages: [
             {
