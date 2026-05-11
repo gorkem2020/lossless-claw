@@ -2273,6 +2273,12 @@ export class LcmContextEngine implements ContextEngine {
   ): boolean {
     const provider = telemetry?.provider?.trim().toLowerCase() ?? "";
     const model = telemetry?.model?.trim().toLowerCase() ?? "";
+    const modelUsesOpenAiPromptCache =
+      model.startsWith("gpt-")
+      || /^o[1-9](?:-|$)/.test(model);
+    if (modelUsesOpenAiPromptCache) {
+      return true;
+    }
     const identifiers = [provider, model];
     return identifiers.some((identifier) =>
       identifier.includes("anthropic")
@@ -2349,12 +2355,10 @@ export class LcmContextEngine implements ContextEngine {
    *    high-velocity sessions can livelock the dispatcher: each turn refreshes
    *    `lastCacheTouchAt`, the TTL window never expires, deferred work never
    *    fires, and the runtime emergency overflow handler is left to do all
-   *    the work. The default 0.70 threshold (configurable via
-   *    `cacheAwareCompaction.criticalBudgetPressureRatio`) leaves a ~30%
-   *    headroom band (0–70%) where cache-aware throttling still applies;
-   *    above that band the cache hold is broken so deferred compaction can
-   *    drag the prompt back down before the runtime emergency overflow
-   *    handler is needed.
+   *    the work. The default 0.90 threshold (configurable via
+   *    `cacheAwareCompaction.criticalBudgetPressureRatio`) keeps ordinary
+   *    threshold compaction inside the cache-protected band while preserving
+   *    a final overflow-avoidance escape hatch.
    */
   private shouldDelayPromptMutatingDeferredCompaction(
     telemetry: ConversationCompactionTelemetryRecord | null,

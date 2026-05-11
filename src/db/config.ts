@@ -23,7 +23,7 @@ export function resolveOpenclawStateDir(env: NodeJS.ProcessEnv = process.env): s
  * value. Mirrored to `src/engine.ts`'s `?? DEFAULT_CRITICAL_BUDGET_PRESSURE_RATIO`
  * usage.
  */
-export const DEFAULT_CRITICAL_BUDGET_PRESSURE_RATIO = 0.70;
+export const DEFAULT_CRITICAL_BUDGET_PRESSURE_RATIO = 0.90;
 export const DEFAULT_AUTO_ROTATE_SESSION_FILE_SIZE_BYTES = 2 * 1024 * 1024;
 
 export type CacheAwareCompactionConfig = {
@@ -35,21 +35,17 @@ export type CacheAwareCompactionConfig = {
   coldCacheObservationThreshold: number;
   /**
    * Token-budget ratio that bypasses cache-aware deferral when the prompt is
-   * critically full. Defaults to 0.70 — once `currentTokenCount >= 0.70 *
+   * critically full. Defaults to 0.90 — once `currentTokenCount >= 0.90 *
    * tokenBudget`, deferred compaction fires regardless of prompt-cache
    * temperature so the runtime never has to fall back to emergency overflow
    * truncation.
    *
-   * The 0.70 default leaves a 30% headroom band (0–70%) where cache-aware
-   * throttling can defer up to the configured cache TTL window per dispatch
-   * (default 5 minutes via `cacheTTLSeconds: 300`).
-   * Above 70%, the bypass fires every turn regardless of cache state — that
-   * 30% buffer is enough room for a heavily-deferred backlog to drain before
-   * the runtime emergency overflow handler is needed. Set to `>= 1` to
-   * disable the bypass entirely (cache-aware throttling fully controls
-   * deferral).
+   * The 0.90 default leaves the normal 0.75 context threshold inside the
+   * cache-protected band while still preserving a final 10% escape hatch for
+   * overflow avoidance. Set to `>= 1` to disable the bypass entirely
+   * (cache-aware throttling fully controls deferral).
    *
-   * Optional for backward compatibility — runtime defaults to 0.70 when this
+   * Optional for backward compatibility — runtime defaults to 0.90 when this
    * field is absent.
    */
   criticalBudgetPressureRatio?: number;

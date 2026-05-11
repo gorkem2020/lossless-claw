@@ -194,7 +194,7 @@
     },
     "cacheAwareCompaction.criticalBudgetPressureRatio": {
       "label": "Critical Budget Pressure Ratio",
-      "help": "Fraction of token budget at which deferred compaction fires regardless of prompt-cache state. Defaults to 0.70 — set to 1 to disable the override and let cache-aware throttling fully control deferral."
+      "help": "Fraction of token budget at which deferred compaction fires regardless of prompt-cache state. Defaults to 0.90 — set to 1 to disable the override and let cache-aware throttling fully control deferral."
     },
     "dynamicLeafChunkTokens.enabled": {
       "label": "Dynamic Leaf Chunk Tokens",

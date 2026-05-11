@@ -73,7 +73,7 @@ function createTestConfig(databasePath: string): LcmConfig {
       hotCachePressureFactor: 4,
       hotCacheBudgetHeadroomRatio: 0.2,
       coldCacheObservationThreshold: 3,
-      criticalBudgetPressureRatio: 0.70,
+      criticalBudgetPressureRatio: 0.90,
     },
     dynamicLeafChunkTokens: {
       enabled: true,
@@ -8540,7 +8540,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
       messages: [makeMessage({ role: "assistant", content: "fresh turn content" })],
       prePromptMessageCount: 0,
       // Budget chosen so observed input (8K) is far below the critical pressure
-      // ratio (0.70 default). 8K / 200K = 4% — cache-aware path is the only
+      // ratio (0.90 default). 8K / 200K = 4% — cache-aware path is the only
       // gate the test should be probing.
       tokenBudget: 200_000,
       runtimeContext: {

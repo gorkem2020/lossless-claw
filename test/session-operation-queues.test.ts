@@ -72,7 +72,7 @@ function createTestConfig(databasePath: string): LcmConfig {
       hotCachePressureFactor: 4,
       hotCacheBudgetHeadroomRatio: 0.2,
       coldCacheObservationThreshold: 3,
-      criticalBudgetPressureRatio: 0.70,
+      criticalBudgetPressureRatio: 0.90,
     },
     dynamicLeafChunkTokens: {
       enabled: true,

@@ -170,7 +170,7 @@ describe("shouldDelayPromptMutatingDeferredCompaction (cache-aware deferral gate
     }
   });
 
-  it("does NOT defer when prompt is at or above the critical pressure ratio (0.70 default)", () => {
+  it("defers at the default compaction threshold while hot cache is still protected", () => {
     const engine = createEngine();
     const gate = (engine as unknown as {
       shouldDelayPromptMutatingDeferredCompaction: (
@@ -181,12 +181,27 @@ describe("shouldDelayPromptMutatingDeferredCompaction (cache-aware deferral gate
       ) => boolean;
     }).shouldDelayPromptMutatingDeferredCompaction.bind(engine);
 
-    // 140,001 / 200,000 = 0.700005 — above the 0.70 ratio
-    expect(gate(makeHotCodexTelemetry(), new Date(), 140_001, 200_000)).toBe(false);
-    // 140,000 / 200,000 = 0.70 exactly — at the ratio (>= comparison)
-    expect(gate(makeHotCodexTelemetry(), new Date(), 140_000, 200_000)).toBe(false);
-    // 139,999 / 200,000 = 0.699995 — below the ratio
-    expect(gate(makeHotCodexTelemetry(), new Date(), 139_999, 200_000)).toBe(true);
+    // 150,000 / 200,000 = 0.75, matching the default contextThreshold.
+    expect(gate(makeHotCodexTelemetry(), new Date(), 150_000, 200_000)).toBe(true);
+  });
+
+  it("does NOT defer when prompt is at or above the critical pressure ratio (0.90 default)", () => {
+    const engine = createEngine();
+    const gate = (engine as unknown as {
+      shouldDelayPromptMutatingDeferredCompaction: (
+        telemetry: ConversationCompactionTelemetryRecord | null,
+        now?: Date,
+        currentTokenCount?: number,
+        tokenBudget?: number,
+      ) => boolean;
+    }).shouldDelayPromptMutatingDeferredCompaction.bind(engine);
+
+    // 180,001 / 200,000 = 0.900005 — above the 0.90 ratio
+    expect(gate(makeHotCodexTelemetry(), new Date(), 180_001, 200_000)).toBe(false);
+    // 180,000 / 200,000 = 0.90 exactly — at the ratio (>= comparison)
+    expect(gate(makeHotCodexTelemetry(), new Date(), 180_000, 200_000)).toBe(false);
+    // 179,999 / 200,000 = 0.899995 — below the ratio
+    expect(gate(makeHotCodexTelemetry(), new Date(), 179_999, 200_000)).toBe(true);
   });
 
   it("respects a custom criticalBudgetPressureRatio override", () => {
@@ -251,7 +266,7 @@ describe("shouldDelayPromptMutatingDeferredCompaction (cache-aware deferral gate
     expect(gate(makeHotCodexTelemetry(), new Date(), 100_000, 0)).toBe(true);
   });
 
-  it("does not defer when provider is not mutation-sensitive (e.g. plain openai)", () => {
+  it("defers for direct OpenAI GPT models while the cache is hot", () => {
     const engine = createEngine();
     const gate = (engine as unknown as {
       shouldDelayPromptMutatingDeferredCompaction: (
@@ -265,6 +280,27 @@ describe("shouldDelayPromptMutatingDeferredCompaction (cache-aware deferral gate
     expect(
       gate(
         makeHotCodexTelemetry({ provider: "openai", model: "gpt-4o" }),
+        new Date(),
+        100_000,
+        200_000,
+      ),
+    ).toBe(true);
+  });
+
+  it("does not defer when provider and model are not mutation-sensitive", () => {
+    const engine = createEngine();
+    const gate = (engine as unknown as {
+      shouldDelayPromptMutatingDeferredCompaction: (
+        telemetry: ConversationCompactionTelemetryRecord | null,
+        now?: Date,
+        currentTokenCount?: number,
+        tokenBudget?: number,
+      ) => boolean;
+    }).shouldDelayPromptMutatingDeferredCompaction.bind(engine);
+
+    expect(
+      gate(
+        makeHotCodexTelemetry({ provider: "local", model: "llama-4" }),
         new Date(),
         100_000,
         200_000,
