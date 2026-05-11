@@ -12,6 +12,10 @@ import { resetStartupBannerLogsForTests } from "../src/startup-banner-log.js";
 type RegisteredEngineFactory = (() => unknown) | undefined;
 type HookHandler = (event: unknown, context: unknown) => unknown;
 type RegisteredContextEngine = { id: string; factory: () => unknown };
+type SessionStoreSnapshot = Record<string, {
+  totalTokens?: unknown;
+  totalTokensFresh?: unknown;
+}>;
 
 function buildApi(
   pluginConfig: unknown,
@@ -159,6 +163,18 @@ function attachSessionStoreApi(api: OpenClawPluginApi, sessionStorePath: string)
         ? entry.sessionFile
         : join(tmpdir(), `${runtimeSessionId}.jsonl`),
   };
+}
+
+/** Read a session-store snapshot, tolerating transient partial writes during async recovery. */
+function readSessionStoreSnapshot(sessionStorePath: string): SessionStoreSnapshot | undefined {
+  try {
+    return JSON.parse(readFileSync(sessionStorePath, "utf8")) as SessionStoreSnapshot;
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      return undefined;
+    }
+    throw error;
+  }
 }
 
 function defaultModelConfig(model: string): Record<string, unknown> {
@@ -996,11 +1012,8 @@ describe("lcm plugin registration", () => {
         }
       | undefined;
     for (let attempt = 0; attempt < 30; attempt += 1) {
-      const store = JSON.parse(readFileSync(sessionStorePath, "utf8")) as Record<string, {
-        totalTokens?: unknown;
-        totalTokensFresh?: unknown;
-      }>;
-      recoveredEntry = store[sessionKey];
+      const store = readSessionStoreSnapshot(sessionStorePath);
+      recoveredEntry = store?.[sessionKey];
       if (
         recoveredEntry
         && typeof recoveredEntry.totalTokens === "number"
@@ -1108,12 +1121,15 @@ describe("lcm plugin registration", () => {
     expect(secondFactory).toBeTypeOf("function");
     await Promise.resolve(secondFactory!());
 
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    const store = JSON.parse(readFileSync(sessionStorePath, "utf8")) as Record<string, {
-      totalTokens?: unknown;
-      totalTokensFresh?: unknown;
-    }>;
-    expect(store[sessionKey]).toMatchObject({
+    let store: SessionStoreSnapshot | undefined;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      store = readSessionStoreSnapshot(sessionStorePath);
+      if (store?.[sessionKey]?.totalTokens === 50_000) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(store?.[sessionKey]).toMatchObject({
       totalTokens: 50_000,
       totalTokensFresh: true,
     });
@@ -1254,11 +1270,8 @@ describe("lcm plugin registration", () => {
         }>
       | undefined;
     for (let attempt = 0; attempt < 30; attempt += 1) {
-      recoveredStore = JSON.parse(readFileSync(sessionStorePath, "utf8")) as Record<string, {
-        totalTokens?: unknown;
-        totalTokensFresh?: unknown;
-      }>;
-      const recoveredEntry = recoveredStore[sessionKey];
+      recoveredStore = readSessionStoreSnapshot(sessionStorePath);
+      const recoveredEntry = recoveredStore?.[sessionKey];
       if (
         recoveredEntry
         && typeof recoveredEntry.totalTokens === "number"
