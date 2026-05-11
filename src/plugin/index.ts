@@ -161,6 +161,12 @@ function estimateRecoveredSessionTotalTokens(params: {
   return Math.max(RECOVERED_SYSTEM_PROMPT_TOKEN_FLOOR, contextTokens + runtimePromptTokens);
 }
 
+/** Return true when the runtime store already has authoritative token accounting. */
+function hasFreshTotalTokens(sessionEntry: RuntimeSessionStoreEntry): boolean {
+  return sessionEntry.totalTokensFresh === true
+    && toNonNegativeInteger(sessionEntry.totalTokens) !== undefined;
+}
+
 type PluginEnvSnapshot = {
   lcmSummaryModel: string;
   lcmSummaryProvider: string;
@@ -1453,8 +1459,7 @@ const lcmPlugin = {
       }
 
       const loadedStores = new Map<string, Record<string, RuntimeSessionStoreEntry | undefined>>();
-      const dirtyStorePaths = new Set<string>();
-      let recovered = 0;
+      const pendingUpdates = new Map<string, Map<string, number>>();
       for (const conversation of activeConversations) {
         const sessionId = conversation.sessionId?.trim();
         if (!sessionId) {
@@ -1501,6 +1506,9 @@ const lcmPlugin = {
           continue;
         }
         const sessionEntry = rawEntry as RuntimeSessionStoreEntry;
+        if (hasFreshTotalTokens(sessionEntry)) {
+          continue;
+        }
         const contextTokenEstimate = await nextEngine
           .getSummaryStore()
           .getContextTokenCount(conversation.conversationId);
@@ -1508,27 +1516,46 @@ const lcmPlugin = {
           contextTokenEstimate,
           sessionEntry,
         });
-        const existingTotalTokens = toNonNegativeInteger(sessionEntry.totalTokens);
-        const existingFresh = sessionEntry.totalTokensFresh === true;
-        if (existingTotalTokens === estimatedTotalTokens && existingFresh) {
-          continue;
+        let storeUpdates = pendingUpdates.get(storePath);
+        if (!storeUpdates) {
+          storeUpdates = new Map<string, number>();
+          pendingUpdates.set(storePath, storeUpdates);
         }
-
-        store[lookupKey] = {
-          ...sessionEntry,
-          totalTokens: estimatedTotalTokens,
-          totalTokensFresh: true,
-        };
-        dirtyStorePaths.add(storePath);
-        recovered += 1;
+        storeUpdates.set(lookupKey, estimatedTotalTokens);
       }
 
-      for (const storePath of dirtyStorePaths) {
-        const store = loadedStores.get(storePath);
-        if (!store) {
+      let recovered = 0;
+      for (const [storePath, storeUpdates] of pendingUpdates) {
+        let currentStore: Record<string, RuntimeSessionStoreEntry | undefined>;
+        try {
+          currentStore = sessionApi.loadSessionStore(storePath);
+        } catch {
           continue;
         }
-        await writeFile(storePath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+
+        let changed = false;
+        for (const [lookupKey, estimatedTotalTokens] of storeUpdates) {
+          const rawEntry = currentStore[lookupKey];
+          if (!isRecord(rawEntry)) {
+            continue;
+          }
+          const sessionEntry = rawEntry as RuntimeSessionStoreEntry;
+          if (hasFreshTotalTokens(sessionEntry)) {
+            continue;
+          }
+
+          currentStore[lookupKey] = {
+            ...sessionEntry,
+            totalTokens: estimatedTotalTokens,
+            totalTokensFresh: true,
+          };
+          changed = true;
+          recovered += 1;
+        }
+
+        if (changed) {
+          await writeFile(storePath, `${JSON.stringify(currentStore, null, 2)}\n`, "utf8");
+        }
       }
 
       if (recovered > 0) {
