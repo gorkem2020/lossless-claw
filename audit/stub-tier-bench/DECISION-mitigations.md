@@ -1,8 +1,8 @@
-# Decision: v4.2 stub-tier mitigations
+# Decision: stub-tier mitigations
 
 ## Context
 
-After the Opus subagent A/B comparison of v4.1 baseline (333 blocks) vs v4.2-stubs (689 blocks at full migration; 421 in our partial-migration test) at the same 258K-token budget, four mitigations were recommended to address moderate-risk findings (stale-info, cognitive load, stub legibility):
+After the Opus subagent A/B comparison of v4.1 baseline (333 blocks) vs stub-tier (689 blocks at full migration; 421 in our partial-migration test) at the same 258K-token budget, four mitigations were recommended to address moderate-risk findings (stale-info, cognitive load, stub legibility):
 
 1. Recency cue `[t-NNm]` on turn headers
 2. Semantic stub wrapping `<lcm-stub …>` XML tags
@@ -13,15 +13,15 @@ We applied the first-principles-architectural-decision skill (Step 1: research, 
 
 ## Decision
 
-**REJECT ALL FOUR.** Stay with v4.2 as currently shipped (Options C + D + F at commit `e309bed`).
+**REJECT ALL FOUR.** Stay with the stub-tier implementation as currently shipped (Options C + D + F at commit `e309bed`).
 
 ## Rationale
 
 ### #1 — Recency cue `[t-NNm]` — REJECT
 
-**Empirical finding (Step 1):** User messages already carry absolute timestamps in prefix form: `[Thu 2026-04-09 01:38 GMT+7]`. Counted 55 in baseline, 71 in v4.2 (one per user turn). The agent already has the recency signal it needs.
+**Empirical finding (Step 1):** User messages already carry absolute timestamps in prefix form: `[Thu 2026-04-09 01:38 GMT+7]`. Counted 55 in baseline, 71 in the stub-tier variant (one per user turn). The agent already has the recency signal it needs.
 
-**Architectural failure (Step 2 diagram):** A `[t-NNm]` tag is a function of `now()` at assemble time. The same conversation prefix produces a different rendered string on every assembly. This invalidates the Anthropic prompt cache prefix all the way back to the first turn, on every single request. v4.2's whole value proposition (689 items at same budget) is amortized via prefix caching. Burning the cache to add information already present in the prefix is strictly negative ROI.
+**Architectural failure (Step 2 diagram):** A `[t-NNm]` tag is a function of `now()` at assemble time. The same conversation prefix produces a different rendered string on every assembly. This invalidates the Anthropic prompt cache prefix all the way back to the first turn, on every single request. The stub-tier implementation's whole value proposition (689 items at same budget) is amortized via prefix caching. Burning the cache to add information already present in the prefix is strictly negative ROI.
 
 **Adversarial verdict:** FOR position 85% confidence ("low-cost insurance against unobserved failure mode"). AGAINST position ≥95% confidence (cache thrashing + redundant data). AGAINST wins decisively.
 
@@ -35,7 +35,7 @@ We applied the first-principles-architectural-decision skill (Step 1: research, 
 
 ### #3 — Empty-assistant collapsing — REJECT
 
-**Empirical finding (Step 1):** ~39-40% of assistant turns are empty after stripping the rendered ` ```tool_use``` ` fences (177 → 71 in baseline; 249 → 98 in v4.2; ~identical proportion). Statistically significant.
+**Empirical finding (Step 1):** ~39-40% of assistant turns are empty after stripping the rendered ` ```tool_use``` ` fences (177 → 71 in baseline; 249 → 98 in the stub-tier variant; ~identical proportion). Statistically significant.
 
 **Architectural failure (Step 2 diagram):** The wire-format contract requires `tool_use` blocks to live in assistant turns; `tool_result` blocks pair to them by `toolCallId`. The Anthropic / OpenAI API will reject a `tool_result` whose preceding assistant turn doesn't carry the matching `tool_use`. The "empty" rendering in our dump is a display artifact — the assembler emits content arrays containing tool_use blocks; the dump renderer chose to elide them visually but they exist in the API payload.
 
@@ -87,14 +87,14 @@ Rejecting these mitigations is fully reversible:
 
 - If stale-info actually fires in production, build a cache-stable recency signal (e.g., turn-relative `[turn -47]` instead of clock-relative `[t-12m]`) — that's a different mitigation than #1.
 - If a future model fails to recognize the bracket format, ship Option G (LLM-generated exploration summaries instead of tool_input disambiguators) which gives the agent semantic content rather than format recognition.
-- Empty-assistant work can be revisited as a v4.1 cleanup PR (separate from v4.2, addresses both variants equally).
+- Empty-assistant work can be revisited as a v4.1 cleanup PR (separate from stub-tier, addresses both variants equally).
 - Resolution markers can be revisited if/when explicit user annotations become a workflow primitive elsewhere in OpenClaw.
 
-None of these would compete with the v4.2 work that's shipped.
+None of these would compete with the stub-tier work that's shipped.
 
 ## Conclusion
 
-The current v4.2 (Options C + D + F at commit `e309bed`) is the right shipping shape. Each proposed mitigation either:
+The current stub-tier implementation (Options C + D + F at commit `e309bed`) is the right shipping shape. Each proposed mitigation either:
 - Adds cost without observed benefit (#1 cache thrash; #2 novel format)
 - Conflates rendered transcript with API payload (#3 wire-contract)
 - Has no reliable trigger condition (#4 detection)

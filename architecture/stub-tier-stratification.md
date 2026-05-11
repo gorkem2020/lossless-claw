@@ -1,4 +1,4 @@
-# LCM v4.2 — Stub-Tier Stratification
+# LCM Stub-Tier Stratification
 
 **Status:** Architecture proposal · pre-adversarial review
 **Base:** `pr-613-newest` (= PR #613 v4.1 omnibus)
@@ -21,7 +21,7 @@ BEFORE (v4.1):
     - tool result bodies — often 10k-50k tokens each
   assemble() inlines all of these.
 
-AFTER (v4.2 proposal):
+AFTER (stub-tier proposal):
   messages.content holds:
     - text messages (user, assistant) — unchanged
     - tool calls (the request) — unchanged, naturally small
@@ -45,7 +45,7 @@ AFTER (v4.2 proposal):
 ### 2.1 Goals
 
 1. **G1 — Reduce per-turn assembled context cost by ≥40% on a real LCM with mature history**, measured against the v4.1 agent-harness DB (3,855 leaves, ~13M token corpus), without losing information.
-2. **G2 — Lossless storage invariant preserved.** Every byte that v4.1 stores is still recoverable in v4.2; only its location and access pattern differ.
+2. **G2 — Lossless storage invariant preserved.** Every byte that v4.1 stores is still recoverable after migration; only its location and access pattern differ.
 3. **G3 — Backward-compatible schema migration.** Existing rows continue to work without conversion. Operator can run a one-shot migration tool to convert historical tool messages to stubs at their convenience, on a schedule, or never.
 4. **G4 — No new agent tools required.** Drill-down works via existing `lcm_describe(message_id, expandMessages=true)` and `lcm_grep --mode verbatim`. Both already exist in v4.1.
 5. **G5 — Cache-stable.** Stub representation does not change between consecutive turns for the same message — prompt cache invalidations only happen when a message itself changes.
@@ -320,12 +320,12 @@ Option A is implementation-cheap and preserves v4.1's existing FTS semantics. Do
 | Goal | How verified |
 |---|---|
 | G1 — ≥40% per-turn assembled cost reduction | Run `scripts/v41-qa-runner.mjs --suite full --measure-tokens` against migrated DB; compare to v4.1 baseline |
-| G2 — Lossless invariant | Round-trip: for every migrated message, drill down via `lcm_describe expandMessages=true` and verify exact byte match against pre-migration content. New regression test: `test/v42-blob-tier-roundtrip.test.ts` |
+| G2 — Lossless invariant | Round-trip: for every migrated message, drill down via `lcm_describe expandMessages=true` and verify exact byte match against pre-migration content. New regression test: `test/stub-tier-roundtrip.test.ts` |
 | G3 — Backward-compat schema | Run v4.1 test suite (1533 tests) against migrated DB without any code changes; all must pass. New tests added on top. |
 | G4 — No new tools | Verify by code review: no new entries in `openclaw.plugin.json contracts.tools`. |
-| G5 — Cache stability | Snapshot the assembled prompt for a fixed `currentTokenCount` across two consecutive afterTurn calls; verify the prefix is byte-identical (no spurious stub differences). New regression test: `test/v42-blob-tier-cache-stability.test.ts` |
-| G6 — Refcount correctness | Test: insert 10 messages referencing same blob; refcount=10. Delete 5; refcount=5. Update 1 to point at different blob; old refcount=4, new=1. Run trigger-based and application-code paths separately. New tests: `test/v42-blob-tier-refcount.test.ts` |
-| G7 — Migration idempotency | Run migration tool 3x on same DB; row counts and blob counts must match after each run. New test: `test/v42-blob-tier-migration.test.ts` |
+| G5 — Cache stability | Snapshot the assembled prompt for a fixed `currentTokenCount` across two consecutive afterTurn calls; verify the prefix is byte-identical (no spurious stub differences). New regression test: `test/stub-tier-cache-stability.test.ts` |
+| G6 — Refcount correctness | Test: insert 10 messages referencing same blob; refcount=10. Delete 5; refcount=5. Update 1 to point at different blob; old refcount=4, new=1. Run trigger-based and application-code paths separately. New tests: `test/stub-tier-refcount.test.ts` |
+| G7 — Migration idempotency | Run migration tool 3x on same DB; row counts and blob counts must match after each run. New test: `test/stub-tier-migration.test.ts` |
 | G8 — Test parity | `scripts/v41-qa-runner.mjs --suite full` on migrated DB returns 30/30 (same as v4.1 baseline) |
 
 ### 4.12 Implementation phases
@@ -388,7 +388,7 @@ Final integration test: run `scripts/v41-qa-runner.mjs --suite full --measure-to
 2. **Should user/assistant messages ever be migrated?** Currently `--role tool` only. Some assistant messages contain large code blocks. But assistant content is more semantically valuable; stubbing it would break in-context recall.
 3. **What about `text/thinking` blocks within assistant messages?** v4.1 already strips them in some paths via `removedToolUseBlocks`. Should thinking content go to blobs? Probably not — thinking is the model's reasoning process, structurally part of the assistant turn.
 4. **Garbage collection cadence** — should there be an opt-in `--gc-after` option that auto-purges orphans after each migration run? Current proposal: never auto-GC; always operator-controlled.
-5. **Inline window granularity** — currently uses the same `freshTailCount`/`freshTailMaxTokens` as v4.1. Should there be a separate `inlineToolWindow` config that's independently tunable? Proposal: not for v4.2; revisit in v4.3 if usage patterns demand it.
+5. **Inline window granularity** — currently uses the same `freshTailCount`/`freshTailMaxTokens` as v4.1. Should there be a separate `inlineToolWindow` config that's independently tunable? Proposal: not for the initial stub-tier implementation; revisit later if usage patterns demand it.
 6. **What if a tool result's content varies between calls** (e.g., `date` returns different content each time)? Each call produces a new blob with its own hash. Refcount = 1. Free; no special handling.
 
 ---
@@ -417,7 +417,7 @@ Final integration test: run `scripts/v41-qa-runner.mjs --suite full --measure-to
 
 ## 10. Acceptance criteria for merge
 
-A v4.2 PR can be merged when:
+The stub-tier PR can be merged when:
 
 1. Architecture review (this document) passes adversarial review with no blocking findings.
 2. All 1533 v4.1 tests still pass.

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * v4.2 §B drilldown harness — empirically validate that a real LLM,
- * presented with the v4.2 stub format (`[LCM Tool Output: file_xxx | …]`),
+ * stub-tier drilldown harness — empirically validate that a real LLM,
+ * presented with the stub-tier format (`[LCM Tool Output: file_xxx | …]`),
  * actually invokes `lcm_describe(id="file_xxx")` when it needs the
  * elided tool-result content.
  *
@@ -11,7 +11,7 @@
  * verify the agent reaches for the drilldown when needed.
  *
  * What it does:
- *   1. Opens the migrated DB (--db, default audit/v42-bench/lcm-v42-optionc.db)
+ *   1. Opens the migrated DB (--db, default audit/stub-tier-bench/lcm-stub-tier-optionc.db)
  *   2. Calls ContextAssembler.assemble(...stubLargeToolPayloads=true) for the
  *      target session, capturing the assembled prompt (which contains stubs)
  *   3. For each of N stub-bearing tool_results in the prompt, constructs
@@ -30,7 +30,7 @@
  *   OPENROUTER_API_KEY=$(grep OPENROUTER_API_KEY ~/.openclaw/service-env/ai.openclaw.gateway.env | sed 's/.*=//') \
  *   VOYAGE_API_KEY=$(cat ~/.openclaw/credentials/voyage-api-key) \
  *   LCM_TEST_VEC0_PATH=$HOME/.openclaw/extensions/node_modules/sqlite-vec-darwin-arm64/vec0.dylib \
- *     node scripts/v42-drilldown-harness.mjs --db audit/v42-bench/lcm-v42-optionc.db \
+ *     node scripts/stub-tier-drilldown-harness.mjs --db audit/stub-tier-bench/lcm-stub-tier-optionc.db \
  *       --session-id 0cb8928b-f925-4be1-a995-a30f30938cf4 \
  *       --scenarios 5 --model openai/gpt-4o-mini
  *
@@ -65,7 +65,7 @@ const getArg = (n) => {
   return i >= 0 && i < args.length - 1 ? args[i + 1] : undefined;
 };
 
-const dbPath = getArg("db") ?? "/Volumes/LEXAR/repos/lossless-claw/audit/v42-bench/lcm-v42-optionc.db";
+const dbPath = getArg("db") ?? "/Volumes/LEXAR/repos/lossless-claw/audit/stub-tier-bench/lcm-stub-tier-optionc.db";
 const sessionId = getArg("session-id") ?? "0cb8928b-f925-4be1-a995-a30f30938cf4";
 const sessionKey = getArg("session-key") ?? "agent:main:main";
 const tokenBudget = Number(getArg("budget") ?? 258000);
@@ -112,7 +112,7 @@ const conversationStore = new ConversationStore(db);
 const summaryStore = new SummaryStore(db);
 const assembler = new ContextAssembler(conversationStore, summaryStore, "UTC");
 
-// --no-stubs lets us compare baseline (v4.1) vs v4.2 with the SAME prompt,
+// --no-stubs lets us compare baseline (v4.1) vs stub-tier with the SAME prompt,
 // so we can read the agent's answer side-by-side and judge confabulation.
 const stubsOn = !args.includes("--no-stubs");
 const assembled = await assembler.assemble({
@@ -371,7 +371,7 @@ async function llmCall(messages, opts = {}) {
     headers: {
       "Authorization": `Bearer ${apiKey}`,
       "Content-Type": "application/json",
-      "X-Title": "v4.2 drilldown harness",
+      "X-Title": "stub-tier drilldown harness",
     },
     body: JSON.stringify(body),
   });

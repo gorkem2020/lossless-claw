@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * v4.2 §B blob-migrate (Option C) — externalize large tool-result payloads
+ * Stub-tier blob migration — externalize large tool-result payloads
  * to the v4.1 `large_files` storage model.
  *
  * For each `role='tool'` row whose `messages.content` exceeds the byte

@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /**
- * v4.2 assemble-bench — measure assembled context cost on a snapshot DB.
+ * stub-tier assemble bench — measure assembled context cost on a snapshot DB.
  *
  * Calls engine.assemble() for the most-active session and captures token
  * counts, item composition (summaries vs raw vs fresh-tail), and segment
- * breakdowns. Used to compare baseline v4.1 vs proposed v4.2 variants.
+ * breakdowns. Used to compare baseline v4.1 vs stub-tier variants.
  *
  * USAGE:
  *   VOYAGE_API_KEY=$(cat ~/.openclaw/credentials/voyage-api-key) \
  *   LCM_TEST_VEC0_PATH=$HOME/.openclaw/extensions/node_modules/sqlite-vec-darwin-arm64/vec0.dylib \
- *     node scripts/v42-assemble-bench.mjs --db <path>
+ *     node scripts/stub-tier-assemble-bench.mjs --db <path>
  *
  * NEVER touches the live DB; pass an explicit --db.
  *
@@ -39,7 +39,7 @@ const jsonOut = getArg("json-out");
 const verbose = hasFlag("verbose");
 
 if (!dbPath) {
-  console.error("Usage: v42-assemble-bench.mjs --db <path> [--variant LABEL] [--budget N] [--session-id ID]");
+  console.error("Usage: stub-tier-assemble-bench.mjs --db <path> [--variant LABEL] [--budget N] [--session-id ID]");
   process.exit(1);
 }
 if (!existsSync(dbPath)) {
@@ -112,9 +112,9 @@ const config = {
     coldCacheObservationThreshold: 3, criticalBudgetPressureRatio: 0.7,
   },
   dynamicLeafChunkTokens: { enabled: true, max: 40000 },
-  // v4.2 §B — picked up by engine.assemble() via the cast; on for the
-  // "v42-stubs" variant, off for "baseline".
-  stubLargeToolPayloads: variantLabel === "v42-stubs",
+  // stub-tier flag picked up by engine.assemble() via the cast; on for the
+  // "stub-tier" variant, off for "baseline".
+  stubLargeToolPayloads: variantLabel === "stub-tier",
 };
 
 const noopLog = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
@@ -198,7 +198,7 @@ try {
     freshTailCount: config.freshTailCount,
     freshTailMaxTokens: config.freshTailMaxTokens,
     promptAwareEviction: config.promptAwareEviction,
-    stubLargeToolPayloads: variantLabel === "v42-stubs",
+    stubLargeToolPayloads: variantLabel === "stub-tier",
   });
 } catch (err) {
   error = String(err?.stack ?? err);
@@ -226,7 +226,7 @@ for (const item of result.messages ?? []) {
   totalMessageTokens += Math.ceil(text.length / 4);
 }
 
-// v4.2 §B — pull stub diagnostics out of the assembled debug bag.
+// Pull stub-tier diagnostics out of the assembled debug bag.
 const stubStats = result.debug?.stubStats ?? null;
 
 // ── Output ──
@@ -261,7 +261,7 @@ const report = {
       JOIN conversations c ON c.conversation_id = s.conversation_id
       WHERE c.session_id = ?
     `).get(sessionToBench).n,
-    // v4.2 §B — surface stratification state of the DB so the bench
+    // stub-tier stratification state of the DB so the bench
     // report makes it obvious whether large_content was populated for
     // this run.
     messagesWithLargeContent: (() => {
