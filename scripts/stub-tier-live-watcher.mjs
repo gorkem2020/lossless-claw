@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * v4.2 §B live watcher — tails the gateway log + LCM DB to surface
+ * stub-tier live watcher — tails the gateway log + LCM DB to surface
  * stub-tier telemetry in real time during a live session.
  *
  * What it surfaces (every event hits stdout as one line):
@@ -14,7 +14,7 @@
  *   [DB stubbedRows=… diskUsageMB=…]             periodic DB-state snapshot (every 30s)
  *
  * USAGE:
- *   node scripts/v42-live-watcher.mjs
+ *   node scripts/stub-tier-live-watcher.mjs
  *     [--log PATH]           default ~/.openclaw/logs/gateway.log
  *     [--db PATH]            default ~/.openclaw/lcm.db
  *     [--snapshot-secs N]    default 30
@@ -198,7 +198,7 @@ function snapshotDb() {
         .prepare(`SELECT COUNT(*) AS n FROM messages WHERE large_content IS NOT NULL`)
         .get();
     } catch {
-      schemaState = "pre-v4.2-migration";
+      schemaState = "pre-stub-tier-migration";
     }
     try {
       filesRow = db

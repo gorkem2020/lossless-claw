@@ -157,12 +157,12 @@ function bigPayload(prefix: string, kb: number): string {
 function setupDb(): { db: DatabaseSync; storageDir: string } {
   const db = new DatabaseSync(":memory:");
   runLcmMigrations(db, { fts5Available: false });
-  const storageDir = mkdtempSync(join(tmpdir(), "v42-stub-storage-"));
+  const storageDir = mkdtempSync(join(tmpdir(), "stub-tier-storage-"));
   return { db, storageDir };
 }
 
 function setupScriptDb(): { db: DatabaseSync; dbPath: string; storageDir: string; stateDir: string } {
-  const stateDir = mkdtempSync(join(tmpdir(), "v42-script-state-"));
+  const stateDir = mkdtempSync(join(tmpdir(), "stub-tier-script-state-"));
   const storageDir = join(stateDir, "lcm-files");
   mkdirSync(storageDir, { recursive: true });
   const dbPath = join(stateDir, "lcm.db");

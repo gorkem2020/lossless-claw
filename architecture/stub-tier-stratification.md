@@ -320,12 +320,12 @@ Option A is implementation-cheap and preserves v4.1's existing FTS semantics. Do
 | Goal | How verified |
 |---|---|
 | G1 — ≥40% per-turn assembled cost reduction | Run `scripts/v41-qa-runner.mjs --suite full --measure-tokens` against migrated DB; compare to v4.1 baseline |
-| G2 — Lossless invariant | Round-trip: for every migrated message, drill down via `lcm_describe expandMessages=true` and verify exact byte match against pre-migration content. New regression test: `test/v42-blob-tier-roundtrip.test.ts` |
+| G2 — Lossless invariant | Round-trip: for every migrated message, drill down via `lcm_describe expandMessages=true` and verify exact byte match against pre-migration content. New regression test: `test/stub-tier-blob-roundtrip.test.ts` |
 | G3 — Backward-compat schema | Run v4.1 test suite (1533 tests) against migrated DB without any code changes; all must pass. New tests added on top. |
 | G4 — No new tools | Verify by code review: no new entries in `openclaw.plugin.json contracts.tools`. |
-| G5 — Cache stability | Snapshot the assembled prompt for a fixed `currentTokenCount` across two consecutive afterTurn calls; verify the prefix is byte-identical (no spurious stub differences). New regression test: `test/v42-blob-tier-cache-stability.test.ts` |
-| G6 — Refcount correctness | Test: insert 10 messages referencing same blob; refcount=10. Delete 5; refcount=5. Update 1 to point at different blob; old refcount=4, new=1. Run trigger-based and application-code paths separately. New tests: `test/v42-blob-tier-refcount.test.ts` |
-| G7 — Migration idempotency | Run migration tool 3x on same DB; row counts and blob counts must match after each run. New test: `test/v42-blob-tier-migration.test.ts` |
+| G5 — Cache stability | Snapshot the assembled prompt for a fixed `currentTokenCount` across two consecutive afterTurn calls; verify the prefix is byte-identical (no spurious stub differences). New regression test: `test/stub-tier-cache-stability.test.ts` |
+| G6 — Refcount correctness | Test: insert 10 messages referencing same blob; refcount=10. Delete 5; refcount=5. Update 1 to point at different blob; old refcount=4, new=1. Run trigger-based and application-code paths separately. New tests: `test/stub-tier-refcount.test.ts` |
+| G7 — Migration idempotency | Run migration tool 3x on same DB; row counts and blob counts must match after each run. New test: `test/stub-tier-migration.test.ts` |
 | G8 — Test parity | `scripts/v41-qa-runner.mjs --suite full` on migrated DB returns 30/30 (same as v4.1 baseline) |
 
 ### 4.12 Implementation phases

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * v4.2 assemble-bench — measure assembled context cost on a snapshot DB.
+ * stub-tier assemble-bench — measure assembled context cost on a snapshot DB.
  *
  * Calls engine.assemble() for the most-active session and captures token
  * counts, item composition (summaries vs raw vs fresh-tail), and segment
@@ -9,7 +9,7 @@
  * USAGE:
  *   VOYAGE_API_KEY=$(cat ~/.openclaw/credentials/voyage-api-key) \
  *   LCM_TEST_VEC0_PATH=$HOME/.openclaw/extensions/node_modules/sqlite-vec-darwin-arm64/vec0.dylib \
- *     node scripts/v42-assemble-bench.mjs --db <path>
+ *     node scripts/stub-tier-assemble-bench.mjs --db <path>
  *
  * NEVER touches the live DB; pass an explicit --db.
  *
@@ -39,7 +39,7 @@ const jsonOut = getArg("json-out");
 const verbose = hasFlag("verbose");
 
 if (!dbPath) {
-  console.error("Usage: v42-assemble-bench.mjs --db <path> [--variant LABEL] [--budget N] [--session-id ID]");
+  console.error("Usage: stub-tier-assemble-bench.mjs --db <path> [--variant LABEL] [--budget N] [--session-id ID]");
   process.exit(1);
 }
 if (!existsSync(dbPath)) {
@@ -113,8 +113,8 @@ const config = {
   },
   dynamicLeafChunkTokens: { enabled: true, max: 40000 },
   // v4.2 §B — picked up by engine.assemble() via the cast; on for the
-  // "v42-stubs" variant, off for "baseline".
-  stubLargeToolPayloads: variantLabel === "v42-stubs",
+  // "stub-tier" variant, off for "baseline".
+  stubLargeToolPayloads: variantLabel === "stub-tier",
 };
 
 const noopLog = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
@@ -198,7 +198,7 @@ try {
     freshTailCount: config.freshTailCount,
     freshTailMaxTokens: config.freshTailMaxTokens,
     promptAwareEviction: config.promptAwareEviction,
-    stubLargeToolPayloads: variantLabel === "v42-stubs",
+    stubLargeToolPayloads: variantLabel === "stub-tier",
   });
 } catch (err) {
   error = String(err?.stack ?? err);
