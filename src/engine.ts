@@ -7619,7 +7619,13 @@ export class LcmContextEngine implements ContextEngine {
     nextSessionKey?: string;
   }): Promise<void> {
     const reason = params.reason?.trim();
-    if (!reason || reason === "new" || reason === "unknown") {
+    if (
+      !reason ||
+      reason === "new" ||
+      reason === "unknown" ||
+      reason === "restart" ||
+      reason === "shutdown"
+    ) {
       return;
     }
     if (this.shouldIgnoreSession({ sessionId: params.sessionId, sessionKey: params.sessionKey })) {
