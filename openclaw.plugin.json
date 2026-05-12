@@ -24,6 +24,14 @@
       "label": "Context Threshold",
       "help": "Fraction of context window that triggers compaction (0.0–1.0)"
     },
+    "compactionTargetFraction": {
+      "label": "Compaction Target Fraction",
+      "help": "Optional post-compaction target as a fraction of token budget (0.05–1.0). Explicit target-fraction compactions continue until current tokens drop to compactionTargetFraction × tokenBudget."
+    },
+    "codexOAuthProfile": {
+      "label": "Codex OAuth Profile",
+      "help": "When 'auto' (default) and the host is configured for Codex (openai-codex provider), Codex-tuned defaults apply: contextThreshold=0.90, compactionTargetFraction=0.35, proactiveThresholdCompactionMode=deferred. Operator overrides (env / plugin config) still win. Set to 'off' to disable the profile entirely."
+    },
     "sweepMaxDepth": {
       "label": "Sweep Max Depth",
       "help": "Preferred maximum condensation source depth during routine full sweeps (0 = leaf only, -1 = unlimited). Pressure sweeps may go deeper when summarized context remains above target."
@@ -264,6 +272,15 @@
         "type": "number",
         "minimum": 0,
         "maximum": 1
+      },
+      "compactionTargetFraction": {
+        "type": "number",
+        "minimum": 0.05,
+        "maximum": 1
+      },
+      "codexOAuthProfile": {
+        "type": "string",
+        "enum": ["auto", "off"]
       },
       "sweepMaxDepth": {
         "type": "integer",
