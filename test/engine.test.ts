@@ -8967,6 +8967,60 @@ describe("LcmContextEngine fidelity and token budget", () => {
     expect(result.reason).toBe("provider auth failure");
   });
 
+  it("maintain() keeps threshold debt pending when partial compaction remains over target", async () => {
+    const engine = createEngine();
+    const sessionId = "maintain-deferred-partial-still-over-threshold";
+    const conversation = await engine.getConversationStore().getOrCreateConversation(sessionId, {
+      sessionKey: undefined,
+    });
+    await engine.getCompactionMaintenanceStore().requestProactiveCompactionDebt({
+      conversationId: conversation.conversationId,
+      reason: "threshold",
+      tokenBudget: 4_096,
+      currentTokenCount: 3_500,
+    });
+    const privateEngine = engine as unknown as {
+      compaction: {
+        compactFullSweep: (input: unknown) => Promise<unknown>;
+      };
+    };
+    const compactFullSweepSpy = vi
+      .spyOn(privateEngine.compaction, "compactFullSweep")
+      .mockResolvedValue({
+        actionTaken: true,
+        tokensBefore: 3_500,
+        tokensAfter: 3_200,
+        condensed: false,
+      });
+
+    const result = await engine.maintain({
+      sessionId,
+      sessionFile: createSessionFilePath("maintain-deferred-partial-still-over-threshold"),
+      runtimeContext: {
+        allowDeferredCompactionExecution: true,
+        tokenBudget: 4_096,
+        currentTokenCount: 3_500,
+      },
+    });
+
+    const maintenance = await engine
+      .getCompactionMaintenanceStore()
+      .getConversationCompactionMaintenance(conversation.conversationId);
+    expect(compactFullSweepSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: conversation.conversationId,
+        tokenBudget: 4_096,
+        force: false,
+        hardTrigger: false,
+      }),
+    );
+    expect(maintenance?.pending).toBe(true);
+    expect(maintenance?.running).toBe(false);
+    expect(maintenance?.lastFailureSummary).toBe("compacted but still over target");
+    expect(result.changed).toBe(true);
+    expect(result.reason).toBe("compacted but still over target");
+  });
+
   it("assemble() consumes pending threshold debt before returning context", async () => {
     const engine = createEngine();
     const privateEngine = engine as unknown as {
@@ -10516,6 +10570,58 @@ describe("LcmContextEngine.compact token budget plumbing", () => {
     expect(result.result?.tokensAfter).toBe(4_200);
   });
 
+  it("reports threshold full-sweep compaction as incomplete when tokensAfter remains over target", async () => {
+    const engine = createEngine();
+    const privateEngine = engine as unknown as {
+      compaction: {
+        evaluate: (
+          conversationId: number,
+          tokenBudget: number,
+          observed?: number,
+        ) => Promise<unknown>;
+        compactFullSweep: (input: unknown) => Promise<unknown>;
+      };
+    };
+
+    vi.spyOn(privateEngine.compaction, "evaluate").mockResolvedValue({
+      shouldCompact: true,
+      reason: "threshold",
+      currentTokens: 12_000,
+      threshold: 8_200,
+    });
+    vi.spyOn(privateEngine.compaction, "compactFullSweep").mockResolvedValue({
+      actionTaken: true,
+      tokensBefore: 12_000,
+      tokensAfter: 9_000,
+      condensed: false,
+    });
+
+    await engine.ingest({
+      sessionId: "threshold-sweep-partial-over-target",
+      message: { role: "user", content: "trigger threshold compact" } as AgentMessage,
+    });
+
+    const result = await engine.compact({
+      sessionId: "threshold-sweep-partial-over-target",
+      sessionFile: "/tmp/session.jsonl",
+      tokenBudget: 10_000,
+      currentTokenCount: 12_000,
+      compactionTarget: "threshold",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.compacted).toBe(true);
+    expect(result.reason).toBe("compacted but still over target");
+    expect(result.result?.tokensBefore).toBe(12_000);
+    expect(result.result?.tokensAfter).toBe(9_000);
+    expect(result.result?.details).toEqual(
+      expect.objectContaining({
+        rounds: 1,
+        targetTokens: 8_200,
+      }),
+    );
+  });
+
   it("routes forced budget recovery through compactUntilUnder for the issue #268 overflow shape", async () => {
     const engine = createEngine();
     const privateEngine = engine as unknown as {
@@ -10735,7 +10841,7 @@ describe("LcmContextEngine.assemble maxAssemblyTokenBudget cap", () => {
       .mockResolvedValue({
         actionTaken: true,
         tokensBefore: 6000,
-        tokensAfter: 4500,
+        tokensAfter: 3500,
         condensed: false,
       });
 

@@ -2689,18 +2689,28 @@ export class LcmContextEngine implements ContextEngine {
         typeof sweepResult.tokensAfter === "number" && Number.isFinite(sweepResult.tokensAfter)
           ? sweepResult.tokensAfter
           : undefined;
+      const isThresholdSweep = params.compactionTarget === "threshold";
       const isUnderTargetAfterSweep =
         sweepTokensAfter !== undefined
           ? sweepTokensAfter <= targetTokens
-          : !liveContextStillExceedsTarget;
+          : isThresholdSweep
+            ? false
+            : !liveContextStillExceedsTarget;
+      const thresholdSweepStillOverTarget =
+        isThresholdSweep && sweepResult.actionTaken && !isUnderTargetAfterSweep;
+      const sweepOk =
+        !sweepResult.authFailure &&
+        (isUnderTargetAfterSweep || (sweepResult.actionTaken && !isThresholdSweep));
 
       return {
-        ok: !sweepResult.authFailure && (sweepResult.actionTaken || isUnderTargetAfterSweep),
+        ok: sweepOk,
         compacted: sweepResult.actionTaken,
         reason: sweepResult.authFailure
           ? (sweepResult.actionTaken
               ? "provider auth failure after partial compaction"
               : "provider auth failure")
+          : thresholdSweepStillOverTarget
+            ? "compacted but still over target"
           : sweepResult.actionTaken
             ? "compacted"
             : isUnderTargetAfterSweep
