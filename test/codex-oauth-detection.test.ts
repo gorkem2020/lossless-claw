@@ -2,14 +2,10 @@ import { describe, it, expect } from "vitest";
 import { __test_only_detectCodexOAuthSync as detectMirror } from "../src/plugin/index.js";
 
 /**
- * Tests for detectCodexOAuthSync (PR follow-up to #619).
- *
- * Imports the REAL function via the `__test_only_detectCodexOAuthSync`
- * export so any divergence between docstring and behavior surfaces here as
- * a test failure (no longer a local-mirror copy of the logic).
+ * Tests for the provider-based Codex profile detector.
  */
 
-describe("detectCodexOAuthSync contract (PR follow-up to #619)", () => {
+describe("detectCodexOAuthSync contract", () => {
   it("returns false when no signals indicate codex", () => {
     expect(detectMirror({}, {})).toBe(false);
     expect(detectMirror({ openclawDefaultModel: "anthropic/claude-sonnet-4.5" }, {})).toBe(false);

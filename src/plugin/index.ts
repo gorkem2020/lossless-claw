@@ -215,15 +215,8 @@ type RuntimeModelAuthResult = {
   request?: RuntimeModelRequestTransportOverrides;
   expiresAt?: number;
   /**
-   * Auth mode reported by the openclaw runtime. PR follow-up to #619 uses
-   * this to detect Codex OAuth and apply CODEX_OAUTH_DEFAULTS via the
-   * config resolver's `oauthProfileActive` parameter.
-   *
-   * Mirrors `ResolvedProviderAuth.mode` in
-   * openclaw/dist/plugin-sdk/src/agents/model-auth-runtime-shared.d.ts
-   * (declared as a string union there). We keep the local type permissive
-   * (`string | undefined`) because older openclaw releases may omit this
-   * field, and downstream comparisons check the exact value "oauth".
+   * Auth mode reported by the OpenClaw runtime. Older OpenClaw releases may
+   * omit this field, so local code treats it as advisory.
    */
   mode?: string;
 };
@@ -1046,33 +1039,7 @@ function getRuntimeModelAuth(api: OpenClawPluginApi): RuntimeModelAuth | undefin
   return runtime.modelAuth;
 }
 
-/**
- * PR follow-up to #619 — best-effort SYNC detection of Codex OAuth mode at
- * plugin-registration time, before the dep-builder runs.
- *
- * Why sync (not async): plugin `register()` calls the dep-builder, which
- * historically has been sync-shaped. Awaiting modelAuth.resolveApiKeyForProvider
- * during registration would require touching many call sites; the v1
- * simplification is to detect Codex usage via signals already available
- * synchronously and apply CODEX_OAUTH_DEFAULTS for any Codex-configured host.
- *
- * Detection signals (any-of):
- *   1. envSnapshot.openclawDefaultModel begins with "openai-codex/"
- *   2. pluginConfig.summaryProvider === "openai-codex"
- *   3. pluginConfig.summaryModel  begins with "openai-codex/"
- *   4. pluginConfig.expansionProvider === "openai-codex"
- *   5. pluginConfig.expansionModel  begins with "openai-codex/"
- *
- * Trade-off (intentional, documented): we trigger the OAuth profile for
- * ANY codex-configured host, regardless of whether they're authenticated
- * via OAuth or API key. API-key users who don't want the OAuth defaults
- * can opt out via `codexOAuthProfile: "off"` in plugin config. API-key
- * codex users are rare in practice; the trade-off favors getting OAuth
- * users on the correct cadence without an async plumbing rewrite.
- *
- * V2 plan: thread async detection through register() so this becomes
- * strict OAuth-mode detection via `resolveApiKeyForProvider().mode === "oauth"`.
- */
+/** Detect whether the active host configuration is using the Codex provider. */
 function detectCodexOAuthSync(
   envSnapshot: { openclawDefaultModel?: string },
   pluginConfig?: Record<string, unknown>,
@@ -2035,33 +2002,14 @@ function createLcmDependencies(
   const pluginConfig = registrationConfig.pluginConfig;
   const log = createLcmLogger(api);
 
-  // PR follow-up to #619: detect whether the host is authenticated via
-  // Codex OAuth. When true AND the operator's `codexOAuthProfile` is
-  // "auto" (the default), `CODEX_OAUTH_DEFAULTS` apply as an intermediate
-  // tier in resolveLcmConfigWithDiagnostics (env > pluginConfig >
-  // oauthDefaults > hardcoded).
-  //
-  // Resolution is best-effort: if modelAuth or the resolveApiKeyForProvider
-  // call fails / throws / returns undefined, oauthProfileActive=false and
-  // we use legacy defaults. The OAuth-detection failure should not crash
-  // plugin registration.
+  // The profile is keyed by the existing `codexOAuthProfile` config name, but
+  // current registration-time detection is provider-based. Operators can opt
+  // out explicitly when they use the Codex provider without OAuth semantics.
   let oauthProfileActive = false;
   try {
-    if (modelAuth && typeof modelAuth.resolveApiKeyForProvider === "function") {
-      // resolveApiKeyForProvider is async; await synchronously inside a
-      // best-effort IIFE pattern. Plugin register() is itself async on the
-      // openclaw side (see openclaw/src/plugins/registry.ts), so awaiting
-      // here is safe; but historically lossless-claw's `register()` has
-      // been sync-shaped — we resolve via a synchronous best-effort check
-      // and let the runtime fall back if unavailable.
-      // For now, dispatch a deferred re-resolve on first turn rather than
-      // blocking registration. This is a v1 simplification documented in
-      // the codexOAuthProfile JSDoc; v2 can plumb async detection through
-      // registration.
-      oauthProfileActive = detectCodexOAuthSync(envSnapshot, pluginConfig);
-    }
+    oauthProfileActive = detectCodexOAuthSync(envSnapshot, pluginConfig);
   } catch (err) {
-    log.warn(`[lcm] OAuth profile detection failed; falling back to legacy defaults: ${describeLogError(err)}`);
+    log.warn(`[lcm] Codex profile detection failed; falling back to standard defaults: ${describeLogError(err)}`);
   }
 
   const { config, diagnostics } = resolveLcmConfigWithDiagnostics(
@@ -2075,7 +2023,7 @@ function createLcmDependencies(
       key: "codex-oauth-profile-applied",
       log: (message) => log.info(message),
       message:
-        "[lcm] Codex OAuth profile defaults applied (contextThreshold=0.90, compactionTargetFraction=0.35, respectThresholdAsHardFloor=true, proactiveThresholdCompactionMode=deferred). Override via env / plugin config to opt out, or set codexOAuthProfile=\"off\" to disable entirely.",
+        "[lcm] Codex profile defaults applied (contextThreshold=0.90, compactionTargetFraction=0.35, proactiveThresholdCompactionMode=deferred). Override via env / plugin config to opt out, or set codexOAuthProfile=\"off\" to disable entirely.",
     });
   }
 

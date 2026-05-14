@@ -9,16 +9,8 @@ import type { AgentMessage } from "openclaw/plugin-sdk";
 import type { LcmConfig, LcmDependencies } from "../src/types.js";
 
 /**
- * Tests for the interceptCompaction method (PR follow-up to #619).
- *
- * These are unit tests covering the contract behavior of the method:
- *   - Guard rails (ignored session, stateless session, no config target,
- *     pre-/mid-compaction abort)
- *   - Return shape under each path (handled:true vs handled:false)
- *   - Error swallowing (never throw across the SDK boundary)
- *
- * Full integration with the openclaw `session_before_compact` event is
- * tested separately once PR #1 is wired.
+ * Unit tests for the `interceptCompaction` contract: guard rails, return
+ * shapes, abort handling, and defensive error swallowing at the SDK boundary.
  */
 
 const tempDirs: string[] = [];
@@ -32,7 +24,6 @@ function makeMinimalConfig(databasePath: string, overrides: Partial<LcmConfig> =
     statelessSessionPatterns: [],
     skipStatelessSessions: true,
     contextThreshold: 0.6,
-    respectThresholdAsHardFloor: false,
     freshTailCount: 8,
     freshTailMaxTokens: 24000,
     promptAwareEviction: false,

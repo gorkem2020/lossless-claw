@@ -11,24 +11,8 @@ import { getLcmDbFeatures } from "../src/db/features.js";
 import { createLcmDatabaseConnection, closeLcmConnection } from "../src/db/connection.js";
 
 /**
- * Tests for the post-PR-619 follow-up: compactionTargetFraction plumbing
- * + stopAtTokens precise-stop in compactFullSweep.
- *
- * Coverage approach: the FULL behavioral path (Phase 1 leaf loop, Phase 2
- * condensed loop, both honoring stopAtTokens) is exercised end-to-end via
- * the engine-level intercept-compaction test (test/intercept-compaction.test.ts)
- * and via the live integration tests in test/v41-* . This file covers the
- * narrower CONTRACT layer:
- *   1. Engine.compactFullSweep + Engine.compact accept the documented input
- *      shapes without throwing across the various edge cases (NaN, ±Infinity,
- *      0, negative, fractional, in-range).
- *   2. The validation predicates that determine whether a value is honored
- *      (post-PR fraction floor 0.05; per-call stopAtTokens > 0) match what
- *      the implementation enforces.
- *   3. The fraction → stopAtTokens conversion (floor(fraction * tokenBudget))
- *      produces the documented numeric mapping.
- *   4. The "only forward stopAtTokens when target < tokenBudget" rule that
- *      preserves legacy force=true auth-recovery semantics is documented.
+ * Contract tests for compactionTargetFraction and compactFullSweep stopAtTokens
+ * input handling.
  */
 
 function makeBaselineConfig() {
@@ -46,7 +30,6 @@ function makeBaselineConfig() {
     maxRounds: 6,
     timezone: "UTC",
     summaryMaxOverageFactor: 3,
-    respectThresholdAsHardFloor: false,
   };
 }
 
@@ -164,9 +147,8 @@ describe("compactionTargetFraction — validation surface (engine.compact gate)"
 });
 
 describe("fraction → stopAtTokens conversion (engine.compact)", () => {
-  it("targetTokens = floor(fraction * tokenBudget) for canonical Codex OAuth values", () => {
-    // Documented mapping at src/engine.ts ~line 3535. These constants are
-    // the Codex OAuth profile defaults.
+  it("targetTokens = floor(fraction * tokenBudget) for canonical Codex profile values", () => {
+    // These constants are the Codex profile defaults.
     expect(Math.floor(0.35 * 258_000)).toBe(90_300);
     expect(Math.floor(0.9 * 258_000)).toBe(232_200);
     expect(Math.floor(0.05 * 258_000)).toBe(12_900);

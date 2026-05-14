@@ -6,7 +6,8 @@ Configuration precedence is:
 
 1. Environment variables
 2. `plugins.entries.lossless-claw.config`
-3. Built-in defaults from [`src/db/config.ts`](../src/db/config.ts)
+3. Codex profile defaults, when `codexOAuthProfile` is `"auto"` and the plugin detects the `openai-codex` provider
+4. Built-in defaults from [`src/db/config.ts`](../src/db/config.ts)
 
 Most installations only need to override a handful of keys. If you want a complete starting point, use the full example below and then delete entries you do not need.
 
@@ -21,6 +22,8 @@ Most installations only need to override a handful of keys. If you want a comple
   "statelessSessionPatterns": [],
   "skipStatelessSessions": true,
   "contextThreshold": 0.75,
+  "codexOAuthProfile": "auto",
+  "compactionTargetFraction": 0.35,
   "freshTailCount": 64,
   "freshTailMaxTokens": 24000,
   "promptAwareEviction": false,
@@ -87,6 +90,7 @@ Notes on the example:
 - `timezone` has no fixed hardcoded default; at runtime it resolves from `TZ` first, then the system timezone. The example uses `America/Los_Angeles`.
 - `maxAssemblyTokenBudget` has no default. The example uses `30000` as a realistic cap for a 32k-class model.
 - `summaryPrefixTargetTokens` has no fixed default. The example uses `20000`, which matches the derived default for large-context models with the default `leafChunkTokens`.
+- `compactionTargetFraction` has no fixed default unless the Codex profile is active. The example uses the Codex profile value, `0.35`.
 - `databasePath` is the preferred key. `dbPath` is an accepted alias.
 - `largeFileThresholdTokens` is the preferred key. `largeFileTokenThreshold` is an accepted alias.
 
@@ -145,6 +149,8 @@ Every automatic decision emits grep-able log lines prefixed with `[lcm] auto-rot
 | Key | Type | Default | Env override | Purpose |
 | --- | --- | --- | --- | --- |
 | `contextThreshold` | `number` | `0.75` | `LCM_CONTEXT_THRESHOLD` | Fraction of the active model context window that triggers compaction. |
+| `codexOAuthProfile` | `"auto" \| "off"` | `"auto"` | none | Applies Codex-tuned defaults when the plugin detects the `openai-codex` provider. Set to `"off"` to disable this profile. |
+| `compactionTargetFraction` | `number` | unset, or `0.35` when the Codex profile applies | `LCM_COMPACTION_TARGET_FRACTION` | Optional post-compaction target for explicit target-fraction compactions. Normal threshold sweeps do not use this field unless the caller supplies it. |
 | `freshTailCount` | `integer` | `64` | `LCM_FRESH_TAIL_COUNT` | Number of newest messages always kept raw. |
 | `freshTailMaxTokens` | `integer` | unset | `LCM_FRESH_TAIL_MAX_TOKENS` | Optional token cap for the protected fresh tail. The newest message is always preserved even if it exceeds the cap. |
 | `promptAwareEviction` | `boolean` | `false` | `LCM_PROMPT_AWARE_EVICTION_ENABLED` | When enabled, budget-constrained assembly keeps older evictable items by prompt relevance instead of pure chronology. This improves retrieval under tight budgets, but it can reduce prompt-cache hit rates because the preserved prefix changes as prompts change. |
@@ -222,6 +228,8 @@ Automatic compaction is threshold-only:
 Lossless still records prompt-cache telemetry for status and diagnostics, but cache hotness no longer delays threshold debt. Legacy `cacheAwareCompaction.*` and `dynamicLeafChunkTokens.*` settings remain accepted so existing OpenClaw config continues to load, but they do not change automatic compaction behavior.
 
 Full sweeps treat `sweepMaxDepth` as the normal depth target, not an absolute safety ceiling. The routine condensation phase obeys `sweepMaxDepth`; if the context is still over threshold or the summarized prefix remains above `summaryPrefixTargetTokens`, a pressure phase may use `condensedMinFanoutHard` and condense deeper. This keeps ordinary sweeps shallow while still giving Lossless a way out when too many same-depth summaries would otherwise leave the prompt near full.
+
+`compactionTargetFraction` is separate from ordinary threshold triggering. It is used when an explicit target-fraction compaction is requested, most importantly by the Codex compaction intercept path. With the Codex profile active, Lossless aligns the trigger with Codex's 90% high-water mark and targets 35% of the active token budget after the intercepted sweep. That gives autonomous coding loops more headroom while still relying on the threshold-only automatic path for normal after-turn compaction.
 
 ### Prompt-aware eviction
 

@@ -30,6 +30,35 @@ Good default:
 
 - `0.75`
 
+### `codexOAuthProfile`
+
+Controls whether Lossless applies Codex-tuned defaults when the active host configuration uses the `openai-codex` provider.
+
+Why it matters:
+
+- `auto` keeps Codex autonomous loops on a 90% trigger and 35% post-compaction target.
+- `off` disables the profile for operators who use the Codex provider but want standard Lossless defaults.
+- Explicit env and plugin config values still win over profile defaults.
+
+Good default:
+
+- `auto`
+
+### `compactionTargetFraction`
+
+Optional post-compaction target for explicit target-fraction compactions.
+
+Why it matters:
+
+- Normal after-turn threshold sweeps do not use this field unless the caller supplies it.
+- The Codex profile sets this to `0.35` so intercepted Codex compactions create a larger headroom band before the next trigger.
+- Values below `0.05` are ignored as unsafe.
+
+Good default:
+
+- Leave unset for standard hosts.
+- Use `0.35` for Codex-provider autonomous loops.
+
 ### `freshTailCount`
 
 Keeps the newest messages raw instead of compacting them.
@@ -258,15 +287,14 @@ Why it matters:
 
 ### `proactiveThresholdCompactionMode`
 
-Controls whether proactive threshold compaction is deferred into maintenance debt or kept inline for legacy behavior.
+Controls whether proactive threshold compaction is deferred into maintenance debt or run inline.
 
 Why it matters:
 
 - `deferred` is the default and avoids foreground turn stalls by recording one coalesced maintenance row per conversation
-- `deferred` also stores provider/model/cache telemetry so Anthropic-family sessions can avoid rewriting a still-hot prompt cache
 - `inline` preserves the legacy foreground compaction path for hosts that do not yet support deferred execution
 - `/lossless status` and `/lcm status` surface pending/running/last-failure maintenance state so operators can see when compaction is queued
-- background `maintain()` can still do non-prompt-mutating work, but prompt-mutating debt is consumed pre-assembly once cache is cold or the next turn is already approaching overflow
+- threshold debt is consumed without waiting for prompt-cache hot/cold state
 
 ### `autoRotateSessionFiles`
 
@@ -300,6 +328,18 @@ Operational logging:
 ### `contextThreshold`
 
 See high-impact settings above.
+
+### `codexOAuthProfile`
+
+See high-impact settings above.
+
+### `compactionTargetFraction`
+
+See high-impact settings above.
+
+Env override:
+
+- `LCM_COMPACTION_TARGET_FRACTION`
 
 ### `freshTailCount`
 

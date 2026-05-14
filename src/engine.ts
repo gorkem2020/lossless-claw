@@ -137,9 +137,8 @@ type CompactionExecutionParams = {
   compactionTarget?: "budget" | "threshold";
   /**
    * Optional post-compaction target as a fraction of `tokenBudget`. When set
-   * (typically by the OAuth profile via `config.compactionTargetFraction`,
-   * or explicitly by the `lcm_compact` tool's `targetFraction` param), the
-   * compaction sweep continues until tokens drop to
+   * by the Codex profile via `config.compactionTargetFraction`, the compaction
+   * sweep continues until tokens drop to
    * `targetTokens = compactionTargetFraction * tokenBudget`. Overrides the
    * `compactionTarget` enum's implied target when both are present.
    *
@@ -2742,11 +2741,9 @@ export class LcmContextEngine implements ContextEngine {
       observedTokens !== undefined
         ? await this.compaction.evaluate(conversationId, tokenBudget, observedTokens)
         : await this.compaction.evaluate(conversationId, tokenBudget);
-    // Resolve effective fraction-target (if supplied, overrides the
-    // enum-based target). PR follow-up to #619: introduces the
-    // compactionTargetFraction knob used by the Codex OAuth accordion cadence
-    // (90% trigger → 35% target). Validated to [0.05, 1]; bad values fall
-    // back to the enum-based target.
+    // Resolve the effective fraction target. When supplied, it overrides the
+    // enum-based budget/threshold target and drives the Codex profile's
+    // 90%-to-35% accordion cadence.
     //
     // Lower bound 0.05 is a SAFETY FLOOR: smaller fractions can land below
     // the freshTail / system-prompt / tool-defs overhead on most contexts
@@ -2794,13 +2791,11 @@ export class LcmContextEngine implements ContextEngine {
     // Forced budget recovery should use the capped convergence loop so live
     // overflow counts can drive recovery even when persisted context is already small.
     //
-    // NOTE on fraction-target routing: `compactFullSweep` only honors the
-    // engine's internal `contextThreshold` as its stop condition (it has no
-    // notion of a caller-supplied target). To respect `compactionTargetFraction`
-    // we must route through the convergence loop (`compactUntilUnder`) below,
-    // which accepts `targetTokens` directly. Therefore we explicitly do NOT
-    // include the fraction case in useSweep.
-    const useSweep = manualCompactionRequested || params.compactionTarget === "threshold";
+    // Fraction-target requests need the convergence loop because it accepts an
+    // explicit target token count. Threshold and ordinary manual compactions use
+    // a single full-sweep attempt.
+    const useSweep =
+      validFraction === undefined && (manualCompactionRequested || params.compactionTarget === "threshold");
     if (useSweep) {
       const sweepResult = await this.compaction.compact({
         conversationId,
@@ -6229,12 +6224,7 @@ export class LcmContextEngine implements ContextEngine {
     tokenBudget?: number;
     currentTokenCount?: number;
     compactionTarget?: "budget" | "threshold";
-    /**
-     * PR follow-up to #619: optional post-compaction target as a fraction of
-     * tokenBudget. See `executeCompactionCore` for validation + plumbing.
-     * Forwarded from lcm_compact's `targetFraction` param and from
-     * interceptCompaction's config-driven default.
-     */
+    /** Optional post-compaction target as a fraction of tokenBudget. */
     compactionTargetFraction?: number;
     customInstructions?: string;
     /** OpenClaw runtime param name (preferred). */
@@ -6291,13 +6281,12 @@ export class LcmContextEngine implements ContextEngine {
   }
 
   /**
-   * PR follow-up to #619 — intercept codex's `session_before_compact` event
-   * (via openclaw's context-engine plugin hook) and run lossless compaction
-   * instead of letting codex's native GPT-summarization fire.
+   * Intercept Codex's `session_before_compact` event and run Lossless
+   * compaction instead of Codex's native GPT summarization.
    *
    * Flow:
    *   1. Run engine.compact() with the configured `compactionTargetFraction`
-   *      (defaults from CODEX_OAUTH_DEFAULTS when OAuth profile is active —
+   *      (defaults from CODEX_OAUTH_DEFAULTS when the Codex profile is active —
    *      currently 0.35). This is the accordion cadence: agent has filled
    *      to 90%; codex requested compaction; we lossless-compact down to
    *      35% of budget using leaf + condensed passes.
