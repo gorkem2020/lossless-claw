@@ -18,10 +18,9 @@ export function resolveOpenclawStateDir(env: NodeJS.ProcessEnv = process.env): s
 }
 
 /**
- * Default for `criticalBudgetPressureRatio` — single source of truth so
- * resolver fallback, runtime fallback, and tests can all reference the same
- * value. Mirrored to `src/engine.ts`'s `?? DEFAULT_CRITICAL_BUDGET_PRESSURE_RATIO`
- * usage.
+ * Legacy default for accepted cache-aware config. Automatic compaction no
+ * longer consumes this value, but the resolver keeps it stable for existing
+ * plugin config and status surfaces.
  */
 export const DEFAULT_CRITICAL_BUDGET_PRESSURE_RATIO = 0.90;
 export const DEFAULT_AUTO_ROTATE_SESSION_FILE_SIZE_BYTES = 2 * 1024 * 1024;
@@ -33,21 +32,7 @@ export type CacheAwareCompactionConfig = {
   hotCachePressureFactor: number;
   hotCacheBudgetHeadroomRatio: number;
   coldCacheObservationThreshold: number;
-  /**
-   * Token-budget ratio that bypasses cache-aware deferral when the prompt is
-   * critically full. Defaults to 0.90 — once `currentTokenCount >= 0.90 *
-   * tokenBudget`, deferred compaction fires regardless of prompt-cache
-   * temperature so the runtime never has to fall back to emergency overflow
-   * truncation.
-   *
-   * The 0.90 default leaves the normal 0.75 context threshold inside the
-   * cache-protected band while still preserving a final 10% escape hatch for
-   * overflow avoidance. Set to `>= 1` to disable the bypass entirely
-   * (cache-aware throttling fully controls deferral).
-   *
-   * Optional for backward compatibility — runtime defaults to 0.90 when this
-   * field is absent.
-   */
+  /** Legacy threshold-pressure bypass value. Accepted but not used automatically. */
   criticalBudgetPressureRatio?: number;
 };
 
@@ -106,8 +91,13 @@ export type LcmConfig = {
   leafMinFanout: number;
   condensedMinFanout: number;
   condensedMinFanoutHard: number;
+  /** Preferred source depth for routine full-sweep condensation. */
+  sweepMaxDepth: number;
+  /** Deprecated alias for `sweepMaxDepth`; kept for config compatibility. */
   incrementalMaxDepth: number;
   leafChunkTokens: number;
+  /** Optional target for summarized-prefix tokens after a full sweep. */
+  summaryPrefixTargetTokens?: number;
   /** Maximum raw parent-history tokens imported during first-time bootstrap. */
   bootstrapMaxTokens?: number;
   leafTargetTokens: number;
@@ -152,9 +142,9 @@ export type LcmConfig = {
   circuitBreakerCooldownMs: number;
   /** Explicit fallback provider/model pairs for compaction summarization. */
   fallbackProviders: Array<{ provider: string; model: string }>;
-  /** Cache-sensitive policy for incremental leaf compaction. */
+  /** Legacy cache-sensitive policy. Accepted but not used for automatic compaction. */
   cacheAwareCompaction: CacheAwareCompactionConfig;
-  /** Dynamic step-band policy for incremental leaf chunk sizing. */
+  /** Legacy dynamic step-band policy. Accepted but not used for automatic compaction. */
   dynamicLeafChunkTokens: DynamicLeafChunkTokensConfig;
 };
 
@@ -359,6 +349,16 @@ export function resolveLcmConfigWithDiagnostics(
     parseFiniteInt(env.LCM_BOOTSTRAP_MAX_TOKENS)
       ?? toNumber(pc.bootstrapMaxTokens)
       ?? Math.max(6000, Math.floor(resolvedLeafChunkTokens * 0.3));
+  const resolvedSweepMaxDepth =
+    parseFiniteInt(env.LCM_SWEEP_MAX_DEPTH)
+      ?? parseFiniteInt(env.LCM_INCREMENTAL_MAX_DEPTH)
+      ?? toNumber(pc.sweepMaxDepth)
+      ?? toNumber(pc.incrementalMaxDepth)
+      ?? 1;
+  const resolvedSummaryPrefixTargetTokens = toPositiveInteger(
+    parseFiniteInt(env.LCM_SUMMARY_PREFIX_TARGET_TOKENS)
+      ?? toNumber(pc.summaryPrefixTargetTokens),
+  );
   const envDelegationTimeoutMs =
     env.LCM_DELEGATION_TIMEOUT_MS !== undefined
       ? toNumber(env.LCM_DELEGATION_TIMEOUT_MS)
@@ -467,10 +467,10 @@ export function resolveLcmConfigWithDiagnostics(
       condensedMinFanoutHard:
         parseFiniteInt(env.LCM_CONDENSED_MIN_FANOUT_HARD)
           ?? toNumber(pc.condensedMinFanoutHard) ?? 2,
-      incrementalMaxDepth:
-        parseFiniteInt(env.LCM_INCREMENTAL_MAX_DEPTH)
-          ?? toNumber(pc.incrementalMaxDepth) ?? 1,
+      sweepMaxDepth: resolvedSweepMaxDepth,
+      incrementalMaxDepth: resolvedSweepMaxDepth,
       leafChunkTokens: resolvedLeafChunkTokens,
+      summaryPrefixTargetTokens: resolvedSummaryPrefixTargetTokens,
       bootstrapMaxTokens: resolvedBootstrapMaxTokens,
       leafTargetTokens:
         parseFiniteInt(env.LCM_LEAF_TARGET_TOKENS)

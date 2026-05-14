@@ -24,9 +24,13 @@
       "label": "Context Threshold",
       "help": "Fraction of context window that triggers compaction (0.0–1.0)"
     },
+    "sweepMaxDepth": {
+      "label": "Sweep Max Depth",
+      "help": "Preferred maximum condensation source depth during routine full sweeps (0 = leaf only, -1 = unlimited). Pressure sweeps may go deeper when summarized context remains above target."
+    },
     "incrementalMaxDepth": {
-      "label": "Incremental Max Depth",
-      "help": "How deep incremental compaction goes (0 = leaf only, -1 = unlimited)"
+      "label": "Incremental Max Depth (Deprecated)",
+      "help": "Deprecated alias for sweepMaxDepth. Kept for existing configs."
     },
     "freshTailCount": {
       "label": "Fresh Tail Count",
@@ -46,7 +50,11 @@
     },
     "leafChunkTokens": {
       "label": "Leaf Chunk Tokens",
-      "help": "Maximum source tokens per leaf compaction chunk before summarization"
+      "help": "Maximum source tokens per leaf compaction chunk before summarization (default 20000)"
+    },
+    "summaryPrefixTargetTokens": {
+      "label": "Summary Prefix Target Tokens",
+      "help": "Optional target for summarized-prefix tokens after a full sweep. When omitted, Lossless derives a pressure target from contextThreshold and leafChunkTokens."
     },
     "bootstrapMaxTokens": {
       "label": "Bootstrap Max Tokens",
@@ -169,40 +177,40 @@
       "help": "Cooldown before the summarization circuit breaker auto-resets"
     },
     "cacheAwareCompaction.enabled": {
-      "label": "Cache-Aware Compaction",
-      "help": "When enabled, hot prompt cache defers incremental compaction while cold cache allows bounded catch-up passes"
+      "label": "Cache-Aware Compaction (Deprecated)",
+      "help": "Deprecated compatibility setting. Automatic compaction is now threshold-only and does not use prompt-cache hot/cold state."
     },
     "cacheAwareCompaction.cacheTTLSeconds": {
-      "label": "Short Cache TTL (seconds)",
-      "help": "Treat short-lived prompt-cache entries as hot for this many seconds before deferred compaction may rewrite the prompt"
+      "label": "Short Cache TTL (Deprecated)",
+      "help": "Deprecated compatibility setting. Threshold debt no longer waits for cache TTL."
     },
     "cacheAwareCompaction.maxColdCacheCatchupPasses": {
-      "label": "Cold Cache Catch-Up Passes",
-      "help": "Maximum incremental leaf passes allowed in one maintenance cycle when prompt cache is cold"
+      "label": "Cold Cache Catch-Up (Deprecated)",
+      "help": "Deprecated compatibility setting. Automatic cold-cache catch-up passes were removed."
     },
     "cacheAwareCompaction.hotCachePressureFactor": {
-      "label": "Hot Cache Pressure Factor",
-      "help": "Multiplier applied to the hot-cache leaf trigger before raw-history pressure overrides cache preservation"
+      "label": "Hot Cache Pressure (Deprecated)",
+      "help": "Deprecated compatibility setting. Hot-cache raw-history pressure no longer drives automatic compaction."
     },
     "cacheAwareCompaction.hotCacheBudgetHeadroomRatio": {
-      "label": "Hot Cache Budget Headroom",
-      "help": "Fraction of the real token budget that must remain free before hot-cache incremental compaction is skipped entirely"
+      "label": "Hot Cache Headroom (Deprecated)",
+      "help": "Deprecated compatibility setting. Hot-cache budget headroom no longer defers threshold compaction."
     },
     "cacheAwareCompaction.coldCacheObservationThreshold": {
-      "label": "Cold Cache Observation Threshold",
-      "help": "Consecutive cold observations required before non-explicit cache misses are treated as truly cold"
+      "label": "Cold Cache Observations (Deprecated)",
+      "help": "Deprecated compatibility setting. Cold-cache streaks are diagnostic only."
     },
     "cacheAwareCompaction.criticalBudgetPressureRatio": {
-      "label": "Critical Budget Pressure Ratio",
-      "help": "Fraction of token budget at which deferred compaction fires regardless of prompt-cache state. Defaults to 0.90 — set to 1 to disable the override and let cache-aware throttling fully control deferral."
+      "label": "Critical Budget Pressure (Deprecated)",
+      "help": "Deprecated compatibility setting. contextThreshold is now the only automatic compaction threshold."
     },
     "dynamicLeafChunkTokens.enabled": {
-      "label": "Dynamic Leaf Chunk Tokens",
-      "help": "When enabled, incremental compaction uses a larger working leaf chunk in busy sessions and keeps the static floor in quieter sessions"
+      "label": "Dynamic Leaf Chunks (Deprecated)",
+      "help": "Deprecated compatibility setting. Automatic compaction now uses leafChunkTokens directly."
     },
     "dynamicLeafChunkTokens.max": {
-      "label": "Dynamic Leaf Chunk Max",
-      "help": "Maximum working leaf chunk target for dynamic incremental compaction. The static leafChunkTokens value remains the floor."
+      "label": "Dynamic Leaf Chunk Max (Deprecated)",
+      "help": "Deprecated compatibility setting. Automatic compaction now uses leafChunkTokens directly."
     },
     "timezone": {
       "label": "Timezone",
@@ -257,6 +265,10 @@
         "minimum": 0,
         "maximum": 1
       },
+      "sweepMaxDepth": {
+        "type": "integer",
+        "minimum": -1
+      },
       "incrementalMaxDepth": {
         "type": "integer",
         "minimum": -1
@@ -276,6 +288,10 @@
         "type": "boolean"
       },
       "leafChunkTokens": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "summaryPrefixTargetTokens": {
         "type": "integer",
         "minimum": 1
       },
