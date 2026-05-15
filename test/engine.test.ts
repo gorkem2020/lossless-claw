@@ -9010,8 +9010,9 @@ describe("LcmContextEngine fidelity and token budget", () => {
       expect.objectContaining({
         conversationId: conversation.conversationId,
         tokenBudget: 4_096,
-        force: false,
+        force: true,
         hardTrigger: false,
+        stopAtTokens: 1,
       }),
     );
     expect(maintenance?.pending).toBe(true);
@@ -10481,6 +10482,126 @@ describe("LcmContextEngine.compact token budget plumbing", () => {
         summarize: expect.any(Function),
         force: false,
         hardTrigger: false,
+      }),
+    );
+  });
+
+  it("forces threshold sweeps to account for runtime prompt overhead", async () => {
+    const engine = createEngine();
+    const privateEngine = engine as unknown as {
+      compaction: {
+        evaluate: (
+          conversationId: number,
+          tokenBudget: number,
+          observed?: number,
+        ) => Promise<unknown>;
+        compactFullSweep: (input: unknown) => Promise<unknown>;
+      };
+    };
+
+    vi.spyOn(privateEngine.compaction, "evaluate").mockResolvedValue({
+      shouldCompact: true,
+      reason: "threshold",
+      storedTokens: 7_000,
+      observedTokens: 12_000,
+      currentTokens: 12_000,
+      threshold: 8_200,
+    });
+    const compactFullSweepSpy = vi
+      .spyOn(privateEngine.compaction, "compactFullSweep")
+      .mockResolvedValue({
+        actionTaken: true,
+        tokensBefore: 7_000,
+        tokensAfter: 3_200,
+        condensed: false,
+      });
+
+    await engine.ingest({
+      sessionId: "threshold-runtime-overhead-session",
+      message: { role: "user", content: "trigger threshold compact" } as AgentMessage,
+    });
+
+    const result = await engine.compact({
+      sessionId: "threshold-runtime-overhead-session",
+      sessionFile: "/tmp/session.jsonl",
+      tokenBudget: 10_000,
+      currentTokenCount: 12_000,
+      compactionTarget: "threshold",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.compacted).toBe(true);
+    expect(result.reason).toBe("compacted");
+    expect(compactFullSweepSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: expect.any(Number),
+        tokenBudget: 10_000,
+        summarize: expect.any(Function),
+        force: true,
+        hardTrigger: false,
+        stopAtTokens: 3_200,
+      }),
+    );
+    expect(result.result?.details).toEqual(
+      expect.objectContaining({
+        targetTokens: 3_200,
+        observedOverheadTokens: 5_000,
+        projectedTokensAfter: 8_200,
+      }),
+    );
+  });
+
+  it("does not clear threshold pressure when persisted tokens are under target but runtime tokens remain over", async () => {
+    const engine = createEngine();
+    const privateEngine = engine as unknown as {
+      compaction: {
+        evaluate: (
+          conversationId: number,
+          tokenBudget: number,
+          observed?: number,
+        ) => Promise<unknown>;
+        compactFullSweep: (input: unknown) => Promise<unknown>;
+      };
+    };
+
+    vi.spyOn(privateEngine.compaction, "evaluate").mockResolvedValue({
+      shouldCompact: true,
+      reason: "threshold",
+      storedTokens: 7_000,
+      observedTokens: 12_000,
+      currentTokens: 12_000,
+      threshold: 8_200,
+    });
+    vi.spyOn(privateEngine.compaction, "compactFullSweep").mockResolvedValue({
+      actionTaken: false,
+      tokensBefore: 7_000,
+      tokensAfter: 7_000,
+      condensed: false,
+    });
+
+    await engine.ingest({
+      sessionId: "threshold-runtime-still-over-session",
+      message: { role: "user", content: "trigger threshold compact" } as AgentMessage,
+    });
+
+    const result = await engine.compact({
+      sessionId: "threshold-runtime-still-over-session",
+      sessionFile: "/tmp/session.jsonl",
+      tokenBudget: 10_000,
+      currentTokenCount: 12_000,
+      compactionTarget: "threshold",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.compacted).toBe(false);
+    expect(result.reason).toBe("live context still exceeds target");
+    expect(result.result?.tokensBefore).toBe(12_000);
+    expect(result.result?.tokensAfter).toBe(7_000);
+    expect(result.result?.details).toEqual(
+      expect.objectContaining({
+        targetTokens: 3_200,
+        observedOverheadTokens: 5_000,
+        projectedTokensAfter: 12_000,
       }),
     );
   });

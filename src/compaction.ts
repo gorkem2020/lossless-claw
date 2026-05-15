@@ -11,6 +11,10 @@ import { LcmProviderAuthError } from "./summarize.js";
 export interface CompactionDecision {
   shouldCompact: boolean;
   reason: "threshold" | "manual" | "none";
+  /** Persisted Lossless context tokens before runtime prompt overhead. */
+  storedTokens: number;
+  /** Runtime-observed prompt tokens, when supplied by the host. */
+  observedTokens?: number;
   currentTokens: number;
   threshold: number;
 }
@@ -428,6 +432,8 @@ export class CompactionEngine {
       return {
         shouldCompact: true,
         reason: "threshold",
+        storedTokens,
+        ...(liveTokens > 0 ? { observedTokens: liveTokens } : {}),
         currentTokens,
         threshold,
       };
@@ -436,6 +442,8 @@ export class CompactionEngine {
     return {
       shouldCompact: false,
       reason: "none",
+      storedTokens,
+      ...(liveTokens > 0 ? { observedTokens: liveTokens } : {}),
       currentTokens,
       threshold,
     };

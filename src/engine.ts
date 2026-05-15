@@ -2652,6 +2652,24 @@ export class LcmContextEngine implements ContextEngine {
       params.compactionTarget === "threshold" ? decision.threshold : tokenBudget;
     const liveContextStillExceedsTarget =
       observedTokens !== undefined && observedTokens >= targetTokens;
+    // Codex can report a live prompt count that includes runtime framing,
+    // tool schemas, and other overhead not present in Lossless's stored count.
+    // If that live count crosses the threshold, compact stored context far
+    // enough that stored tokens plus the observed overhead should fit.
+    const decisionStoredTokens =
+      typeof decision.storedTokens === "number"
+      && Number.isFinite(decision.storedTokens)
+      && decision.storedTokens >= 0
+        ? Math.floor(decision.storedTokens)
+        : decision.currentTokens;
+    const observedRuntimeOverhead =
+      params.compactionTarget === "threshold" && observedTokens !== undefined
+        ? Math.max(0, observedTokens - decisionStoredTokens)
+        : 0;
+    const runtimeAdjustedSweepTargetTokens =
+      observedRuntimeOverhead > 0 && observedTokens !== undefined && observedTokens > targetTokens
+        ? Math.max(1, targetTokens - observedRuntimeOverhead)
+        : undefined;
 
     if (!forceCompaction && !decision.shouldCompact) {
       return {
@@ -2672,9 +2690,12 @@ export class LcmContextEngine implements ContextEngine {
         conversationId,
         tokenBudget,
         summarize,
-        force: forceCompaction,
+        force: forceCompaction || runtimeAdjustedSweepTargetTokens !== undefined,
         hardTrigger: false,
         summaryModel,
+        ...(runtimeAdjustedSweepTargetTokens !== undefined
+          ? { stopAtTokens: runtimeAdjustedSweepTargetTokens }
+          : {}),
       });
 
       if (sweepResult.authFailure && breakerKey) {
@@ -2689,10 +2710,14 @@ export class LcmContextEngine implements ContextEngine {
         typeof sweepResult.tokensAfter === "number" && Number.isFinite(sweepResult.tokensAfter)
           ? sweepResult.tokensAfter
           : undefined;
+      const projectedTokensAfterSweep =
+        sweepTokensAfter !== undefined && runtimeAdjustedSweepTargetTokens !== undefined
+          ? sweepTokensAfter + observedRuntimeOverhead
+          : sweepTokensAfter;
       const isThresholdSweep = params.compactionTarget === "threshold";
       const isUnderTargetAfterSweep =
-        sweepTokensAfter !== undefined
-          ? sweepTokensAfter <= targetTokens
+        projectedTokensAfterSweep !== undefined
+          ? projectedTokensAfterSweep <= targetTokens
           : isThresholdSweep
             ? false
             : !liveContextStillExceedsTarget;
@@ -2723,7 +2748,13 @@ export class LcmContextEngine implements ContextEngine {
           tokensAfter: sweepResult.tokensAfter,
           details: {
             rounds: sweepResult.actionTaken ? 1 : 0,
-            targetTokens,
+            targetTokens: runtimeAdjustedSweepTargetTokens ?? targetTokens,
+            ...(runtimeAdjustedSweepTargetTokens !== undefined
+              ? {
+                  observedOverheadTokens: observedRuntimeOverhead,
+                  projectedTokensAfter: projectedTokensAfterSweep,
+                }
+              : {}),
           },
         },
       };
