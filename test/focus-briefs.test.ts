@@ -79,6 +79,21 @@ describe("focus brief generation", () => {
     expect(__focusBriefTesting.resolveFocusMinimumTokens(12_000)).toBe(7200);
   });
 
+  it("derives a longer timeout for large focus briefs", () => {
+    expect(
+      __focusBriefTesting.resolveFocusDelegationTimeoutMs({
+        configuredTimeoutMs: 120_000,
+        targetTokens: 12_000,
+      }),
+    ).toBe(240_000);
+    expect(
+      __focusBriefTesting.resolveFocusDelegationTimeoutMs({
+        configuredTimeoutMs: 120_000,
+        targetTokens: 30_000,
+      }),
+    ).toBe(600_000);
+  });
+
   it("parses fenced JSON replies from the delegated subagent", () => {
     const parsed = __focusBriefTesting.parseFocusBriefReply(
       [

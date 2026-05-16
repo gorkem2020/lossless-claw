@@ -17,6 +17,9 @@ const MAX_FOCUS_BRIEF_TARGET_TOKENS = 30_000;
 const FOCUS_BRIEF_TARGET_TOKEN_MULTIPLIER = 10;
 const FOCUS_BRIEF_MINIMUM_TOKEN_RATIO = 0.6;
 const MIN_FOCUS_BRIEF_TARGET_TOKENS = 12_000;
+const MIN_FOCUS_BRIEF_TIMEOUT_MS = 240_000;
+const MAX_FOCUS_BRIEF_TIMEOUT_MS = 900_000;
+const FOCUS_BRIEF_TIMEOUT_MS_PER_TARGET_TOKEN = 20;
 
 /** A future recall question that would help deepen a generated focus brief. */
 export type FocusBriefExpansionPrompt = {
@@ -208,6 +211,18 @@ function resolveFocusExpansionTokenCap(params: {
   const summaryDerived = Math.max(configured, Math.floor(params.summaryTokens * 10));
   const targetDerived = Math.max(configured, Math.floor(params.targetTokens * 2));
   return Math.min(120_000, Math.max(configured, summaryDerived, targetDerived, 40_000));
+}
+
+function resolveFocusDelegationTimeoutMs(params: {
+  configuredTimeoutMs: number;
+  targetTokens: number;
+}): number {
+  const configured = Math.max(1, Math.floor(params.configuredTimeoutMs));
+  const targetDerived = Math.max(1, Math.floor(params.targetTokens * FOCUS_BRIEF_TIMEOUT_MS_PER_TARGET_TOKEN));
+  return Math.min(
+    MAX_FOCUS_BRIEF_TIMEOUT_MS,
+    Math.max(configured, MIN_FOCUS_BRIEF_TIMEOUT_MS, targetDerived),
+  );
 }
 
 function buildFocusBriefTask(params: {
@@ -423,7 +438,10 @@ export async function runDelegatedFocusBrief(params: {
     defaultExpandTokens: params.deps.config.maxExpandTokens,
   });
   const minimumTokens = resolveFocusMinimumTokens(targetTokens);
-  const timeoutMs = Math.max(1, Math.floor(params.deps.config.delegationTimeoutMs));
+  const timeoutMs = resolveFocusDelegationTimeoutMs({
+    configuredTimeoutMs: params.deps.config.delegationTimeoutMs,
+    targetTokens,
+  });
   const requestId = resolveExpansionRequestId(params.requesterSessionKey);
   const requesterAgentId = params.deps.normalizeAgentId(
     params.deps.parseAgentSessionKey(params.requesterSessionKey)?.agentId,
@@ -576,6 +594,7 @@ export const __focusBriefTesting = {
   buildActiveSummaryManifest,
   buildFocusBriefTask,
   parseFocusBriefReply,
+  resolveFocusDelegationTimeoutMs,
   resolveFocusMinimumTokens,
   resolveFocusTargetTokens,
 };
