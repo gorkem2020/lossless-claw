@@ -19,7 +19,7 @@ const FOCUS_BRIEF_MINIMUM_TOKEN_RATIO = 0.6;
 const MIN_FOCUS_BRIEF_TARGET_TOKENS = 12_000;
 const MIN_FOCUS_BRIEF_TIMEOUT_MS = 240_000;
 const MAX_FOCUS_BRIEF_TIMEOUT_MS = 900_000;
-const FOCUS_BRIEF_TIMEOUT_MS_PER_TARGET_TOKEN = 20;
+const FOCUS_BRIEF_TIMEOUT_MS_PER_TARGET_TOKEN = 50;
 
 /** A future recall question that would help deepen a generated focus brief. */
 export type FocusBriefExpansionPrompt = {

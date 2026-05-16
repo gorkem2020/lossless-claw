@@ -121,13 +121,19 @@ describe("focus brief generation", () => {
         configuredTimeoutMs: 120_000,
         targetTokens: 12_000,
       }),
-    ).toBe(240_000);
+    ).toBe(600_000);
     expect(
       __focusBriefTesting.resolveFocusDelegationTimeoutMs({
         configuredTimeoutMs: 300_000,
         targetTokens: 12_000,
       }),
-    ).toBe(300_000);
+    ).toBe(600_000);
+    expect(
+      __focusBriefTesting.resolveFocusDelegationTimeoutMs({
+        configuredTimeoutMs: 660_000,
+        targetTokens: 12_000,
+      }),
+    ).toBe(660_000);
   });
 
   it("parses fenced JSON replies from the delegated subagent", () => {
