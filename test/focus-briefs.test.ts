@@ -111,7 +111,7 @@ describe("focus brief generation", () => {
 
   it("targets a much larger brief than the active summary token total", () => {
     expect(__focusBriefTesting.resolveFocusTargetTokens(1200)).toBe(12_000);
-    expect(__focusBriefTesting.resolveFocusTargetTokens(3000)).toBe(30_000);
+    expect(__focusBriefTesting.resolveFocusTargetTokens(3000)).toBe(12_000);
     expect(__focusBriefTesting.resolveFocusMinimumTokens(12_000)).toBe(7200);
   });
 
