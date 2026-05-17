@@ -18,6 +18,7 @@ function createCommandFixture(options?: {
   deps?: LcmDependencies;
   getLcm?: () => Promise<{
     rotateSessionStorageWithBackup: (...args: unknown[]) => Promise<unknown>;
+    compact?: (...args: unknown[]) => Promise<unknown>;
   }>;
 }) {
   const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-command-"));
@@ -256,6 +257,7 @@ describe("lcm command", () => {
     tempDirs.add(fixture.tempDir);
     dbPaths.add(fixture.dbPath);
     const sessionKey = "agent:main:telegram:direct:focus-generate";
+    const lifecycleEvents: string[] = [];
 
     const currentConversation = await fixture.conversationStore.createConversation({
       sessionId: "focus-generate-session",
@@ -320,6 +322,7 @@ describe("lcm command", () => {
     const callGateway = vi.fn(async (request: { method: string; params?: Record<string, unknown> }) => {
       if (request.method === "agent") {
         agentRuns += 1;
+        lifecycleEvents.push(`agent-${agentRuns}`);
         if (agentRuns === 1) {
           expect(String(request.params?.message)).toContain("Gather Lossless focus evidence.");
           expect(String(request.params?.message)).toContain("lcm_grep");
@@ -406,10 +409,18 @@ describe("lcm command", () => {
         debug: vi.fn(),
       },
     } as unknown as LcmDependencies;
+    const compact = vi.fn(async () => {
+      lifecycleEvents.push("compact");
+      return { ok: true, compacted: true, reason: "forced full sweep" };
+    });
     const command = createLcmCommand({
       db: fixture.db,
       config: fixture.config,
       deps,
+      getLcm: async () => ({
+        compact,
+        rotateSessionStorageWithBackup: vi.fn(),
+      }),
     });
 
     const result = await command.handler(
@@ -419,8 +430,19 @@ describe("lcm command", () => {
     );
 
     expect(result.text).toContain("Focus brief");
+    expect(result.text).toContain("Pre-focus compaction");
+    expect(result.text).toContain("compacted: yes");
     expect(result.text).toContain("status: active");
     expect(result.text).toContain("Alpha auth is ready for review.");
+    expect(lifecycleEvents.slice(0, 3)).toEqual(["compact", "agent-1", "agent-2"]);
+    expect(compact).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: "focus-generate-session",
+        sessionKey,
+        compactionTarget: "threshold",
+        force: true,
+      }),
+    );
     expect(callGateway.mock.calls.map((call) => call[0].method)).toEqual([
       "agent",
       "agent.wait",
@@ -520,6 +542,8 @@ describe("lcm command", () => {
     );
     expect(unfocus.text).toContain("status: inactive");
     expect(unfocus.text).toContain("deactivated briefs: 1");
+    expect(unfocus.text).toContain("Post-unfocus compaction");
+    expect(compact).toHaveBeenCalledTimes(2);
     expect(
       fixture.db
         .prepare(`SELECT status FROM focus_briefs WHERE brief_id = ?`)

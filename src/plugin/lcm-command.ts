@@ -7,7 +7,11 @@ import type { RotateSessionStorageWithBackupResult } from "../engine.js";
 import { runDelegatedFocusBrief } from "../focus-briefs.js";
 import type { LcmSummarizeFn } from "../summarize.js";
 import type { LcmDependencies } from "../types.js";
-import type { OpenClawPluginCommandDefinition, PluginCommandContext } from "../openclaw-bridge.js";
+import type {
+  CompactResult,
+  OpenClawPluginCommandDefinition,
+  PluginCommandContext,
+} from "../openclaw-bridge.js";
 import { applyScopedDoctorRepair } from "./lcm-doctor-apply.js";
 import { createLcmDatabaseBackup } from "./lcm-db-backup.js";
 import { describeLogError } from "../lcm-log.js";
@@ -87,6 +91,21 @@ type RotateCommandEngine = {
     lockTimeoutMs: number;
   }): Promise<RotateSessionStorageWithBackupResult>;
 };
+
+type FocusCompactionCommandEngine = {
+  compact(params: {
+    sessionId: string;
+    sessionKey?: string;
+    sessionFile: string;
+    tokenBudget?: number;
+    currentTokenCount?: number;
+    compactionTarget?: "budget" | "threshold";
+    runtimeContext?: Record<string, unknown>;
+    force?: boolean;
+  }): Promise<CompactResult>;
+};
+
+type RuntimeCommandEngine = RotateCommandEngine & Partial<FocusCompactionCommandEngine>;
 
 const DOCTOR_CLEANER_IDS = new Set<DoctorCleanerId>(getDoctorCleanerFilterIds());
 
@@ -504,7 +523,7 @@ async function resolveCurrentConversation(params: {
   };
 }
 
-async function resolveRotateSessionId(params: {
+async function resolveRuntimeSessionId(params: {
   ctx: PluginCommandContext;
   deps: LcmDependencies;
   current: Extract<CurrentConversationResolution, { kind: "resolved" }>;
@@ -525,6 +544,93 @@ async function resolveRotateSessionId(params: {
   }
 
   return normalizeIdentity(params.current.stats.sessionId);
+}
+
+function resolveLifecycleCompactionTokenBudget(config: LcmConfig): number {
+  return config.maxAssemblyTokenBudget && config.maxAssemblyTokenBudget > 0
+    ? Math.floor(config.maxAssemblyTokenBudget)
+    : 128_000;
+}
+
+// Run the cache-aware focus lifecycle sweep. Focus and unfocus both mutate the
+// prompt prefix, so they explicitly take the manual full-sweep path and bypass
+// threshold skips instead of leaving compaction to normal background policy.
+async function runFocusLifecycleCompaction(params: {
+  ctx: PluginCommandContext;
+  deps?: LcmDependencies;
+  getLcm?: () => Promise<RuntimeCommandEngine>;
+  config: LcmConfig;
+  current: Extract<CurrentConversationResolution, { kind: "resolved" }>;
+  sessionKey?: string;
+}): Promise<
+  | { status: "ok"; sessionId: string; result: CompactResult }
+  | { status: "unavailable" | "failed"; reason: string }
+> {
+  if (!params.deps || !params.getLcm) {
+    return {
+      status: "unavailable",
+      reason: "Focus lifecycle compaction requires the runtime-backed LCM engine.",
+    };
+  }
+
+  const sessionKey = params.sessionKey ?? normalizeIdentity(params.ctx.sessionKey);
+  const sessionId = await resolveRuntimeSessionId({
+    ctx: params.ctx,
+    deps: params.deps,
+    current: params.current,
+  });
+  if (!sessionId) {
+    return {
+      status: "unavailable",
+      reason:
+        "Lossless Claw resolved the active conversation, but OpenClaw did not expose or resolve a runtime session id for compaction.",
+    };
+  }
+
+  const engine = await params.getLcm();
+  if (typeof engine.compact !== "function") {
+    return {
+      status: "unavailable",
+      reason: "The runtime-backed LCM engine does not expose compaction to commands.",
+    };
+  }
+
+  let sessionFile = "";
+  try {
+    sessionFile =
+      (await params.deps.resolveSessionTranscriptFile({
+        sessionId,
+        sessionKey,
+      })) ?? "";
+  } catch {
+    sessionFile = "";
+  }
+
+  const tokenBudget = resolveLifecycleCompactionTokenBudget(params.config);
+  try {
+    const result = await engine.compact({
+      sessionId,
+      sessionKey,
+      sessionFile,
+      tokenBudget,
+      currentTokenCount: params.current.stats.contextTokenCount,
+      compactionTarget: "threshold",
+      runtimeContext: {
+        manualCompaction: true,
+        tokenBudget,
+        currentTokenCount: params.current.stats.contextTokenCount,
+      },
+      force: true,
+    });
+    return result.ok
+      ? { status: "ok", sessionId, result }
+      : {
+          status: "failed",
+          reason: result.reason ?? result.error ?? "focus lifecycle compaction failed",
+        };
+  } catch (error) {
+    return { status: "failed", reason: formatFailureReason(error) };
+  }
 }
 
 function resolvePluginEnabled(config: unknown): boolean {
@@ -973,7 +1079,7 @@ async function buildRotateText(params: {
   db: DatabaseSync;
   config: LcmConfig;
   deps?: LcmDependencies;
-  getLcm?: () => Promise<RotateCommandEngine>;
+  getLcm?: () => Promise<RuntimeCommandEngine>;
 }): Promise<string> {
   const lines = [
     ...buildHeaderLines(),
@@ -1020,7 +1126,7 @@ async function buildRotateText(params: {
     return lines.join("\n");
   }
 
-  const sessionId = await resolveRotateSessionId({
+  const sessionId = await resolveRuntimeSessionId({
     ctx: params.ctx,
     deps: params.deps,
     current,
@@ -1332,6 +1438,7 @@ async function buildFocusGenerateText(params: {
   db: DatabaseSync;
   config: LcmConfig;
   deps?: LcmDependencies;
+  getLcm?: () => Promise<RuntimeCommandEngine>;
   prompt: string;
 }): Promise<string> {
   const lines = [
@@ -1340,11 +1447,14 @@ async function buildFocusGenerateText(params: {
     "🎯 Lossless Claw Focus",
     "",
   ];
-  if (!params.deps) {
+  if (!params.deps || !params.getLcm) {
     lines.push(
       buildSection("🛠️ Focus", [
         buildStatLine("status", "unavailable"),
-        buildStatLine("reason", "Focus generation requires runtime dependencies for delegated subagents."),
+        buildStatLine(
+          "reason",
+          "Focus generation requires runtime dependencies for pre-focus compaction and delegated subagents.",
+        ),
       ]),
     );
     return lines.join("\n");
@@ -1364,9 +1474,48 @@ async function buildFocusGenerateText(params: {
     return lines.join("\n");
   }
 
-  const current = await resolveCurrentConversation({ ctx: params.ctx, db: params.db });
+  let current = await resolveCurrentConversation({ ctx: params.ctx, db: params.db });
   if (current.kind === "unavailable") {
     lines.push(
+      buildSection("📍 Current conversation", [
+        buildStatLine("status", "unavailable"),
+        buildStatLine("reason", current.reason),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  const preFocusCompaction = await runFocusLifecycleCompaction({
+    ctx: params.ctx,
+    deps: params.deps,
+    getLcm: params.getLcm,
+    config: params.config,
+    current,
+    sessionKey: requesterSessionKey,
+  });
+  if (preFocusCompaction.status !== "ok") {
+    lines.push(
+      buildSection("📍 Current conversation", [
+        buildStatLine("conversation id", formatNumber(current.stats.conversationId)),
+        buildStatLine("session key", formatCommand(truncateMiddle(requesterSessionKey, 44))),
+      ]),
+      "",
+      buildSection("🧹 Pre-focus compaction", [
+        buildStatLine("status", preFocusCompaction.status),
+        buildStatLine("reason", preFocusCompaction.reason),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  current = await resolveCurrentConversation({ ctx: params.ctx, db: params.db });
+  if (current.kind === "unavailable") {
+    lines.push(
+      buildSection("🧹 Pre-focus compaction", [
+        buildStatLine("status", "completed"),
+        buildStatLine("result", preFocusCompaction.result.reason ?? "done"),
+      ]),
+      "",
       buildSection("📍 Current conversation", [
         buildStatLine("status", "unavailable"),
         buildStatLine("reason", current.reason),
@@ -1454,6 +1603,12 @@ async function buildFocusGenerateText(params: {
       buildStatLine("source context hash", sourceContextHash.slice(0, 16)),
     ]),
     "",
+    buildSection("🧹 Pre-focus compaction", [
+      buildStatLine("status", "completed"),
+      buildStatLine("compacted", formatBoolean(preFocusCompaction.result.compacted)),
+      buildStatLine("result", preFocusCompaction.result.reason ?? "done"),
+    ]),
+    "",
     buildSection("🎯 Focus brief", [
       buildStatLine("brief id", formatCommand(brief.briefId)),
       buildStatLine("status", brief.status),
@@ -1486,6 +1641,9 @@ async function buildFocusGenerateText(params: {
 async function buildUnfocusText(params: {
   ctx: PluginCommandContext;
   db: DatabaseSync;
+  config: LcmConfig;
+  deps?: LcmDependencies;
+  getLcm?: () => Promise<RuntimeCommandEngine>;
 }): Promise<string> {
   const lines = [
     ...buildHeaderLines(),
@@ -1504,11 +1662,48 @@ async function buildUnfocusText(params: {
     return lines.join("\n");
   }
   const store = new FocusBriefStore(params.db);
+  const active = await store.getActiveFocusBrief(current.stats.conversationId);
+  if (!active) {
+    lines.push(
+      buildSection("🎯 Focus", [
+        buildStatLine("status", "none active"),
+        buildStatLine("deactivated briefs", "0"),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
   const deactivated = await store.deactivateActiveFocusBriefs(current.stats.conversationId);
+  const postUnfocusCompaction = await runFocusLifecycleCompaction({
+    ctx: params.ctx,
+    deps: params.deps,
+    getLcm: params.getLcm,
+    config: params.config,
+    current,
+    sessionKey:
+      normalizeIdentity(params.ctx.sessionKey) ??
+      normalizeIdentity(current.stats.sessionKey ?? undefined),
+  });
+
   lines.push(
     buildSection("🎯 Focus", [
       buildStatLine("status", deactivated > 0 ? "inactive" : "none active"),
       buildStatLine("deactivated briefs", formatNumber(deactivated)),
+    ]),
+  );
+  lines.push(
+    "",
+    buildSection("🧹 Post-unfocus compaction", [
+      buildStatLine(
+        "status",
+        postUnfocusCompaction.status === "ok" ? "completed" : postUnfocusCompaction.status,
+      ),
+      ...(postUnfocusCompaction.status === "ok"
+        ? [
+            buildStatLine("compacted", formatBoolean(postUnfocusCompaction.result.compacted)),
+            buildStatLine("result", postUnfocusCompaction.result.reason ?? "done"),
+          ]
+        : [buildStatLine("reason", postUnfocusCompaction.reason)]),
     ]),
   );
   return lines.join("\n");
@@ -1758,7 +1953,7 @@ export function createLcmCommand(params: {
   config: LcmConfig;
   deps?: LcmDependencies;
   summarize?: LcmSummarizeFn;
-  getLcm?: () => Promise<RotateCommandEngine>;
+  getLcm?: () => Promise<RuntimeCommandEngine>;
 }): OpenClawPluginCommandDefinition {
   const getDb = async (): Promise<DatabaseSync> =>
     typeof params.db === "function" ? await params.db() : params.db;
@@ -1805,11 +2000,20 @@ export function createLcmCommand(params: {
               db: await getDb(),
               config: params.config,
               deps: params.deps,
+              getLcm: params.getLcm,
               prompt: parsed.prompt,
             }),
           };
         case "unfocus":
-          return { text: await buildUnfocusText({ ctx, db: await getDb() }) };
+          return {
+            text: await buildUnfocusText({
+              ctx,
+              db: await getDb(),
+              config: params.config,
+              deps: params.deps,
+              getLcm: params.getLcm,
+            }),
+          };
         case "doctor":
           return parsed.apply
             ? {

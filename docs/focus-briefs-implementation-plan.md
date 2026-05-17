@@ -20,9 +20,12 @@ Use command words rather than flags so the interface works well on mobile:
 /lossless unfocus
 ```
 
-- `/lossless focus <prompt>` generates or refocuses around the prompt and, once overlays are enabled, activates the resulting brief.
+- `/lossless focus <prompt>` runs a forced full-sweep compaction, generates or
+  refocuses around the prompt from the fresh summary frontier, and activates the
+  resulting brief.
 - `/lossless focus` reports active/draft focus state, prompt, preview, and diagnostics.
-- `/lossless unfocus` deactivates the active focus overlay once overlays exist.
+- `/lossless unfocus` deactivates the active focus overlay once overlays exist,
+  then runs a forced full-sweep compaction.
 
 ## Architecture Decisions
 
@@ -39,6 +42,10 @@ Use command words rather than flags so the interface works well on mobile:
 - New summaries while focus is active should remain visible as post-focus delta.
   The later overlay implementation should use a coverage watermark rather than
   relying only on masked summary IDs.
+- Focus and unfocus are prompt-prefix lifecycle operations. Because they break
+  prompt caching just like compaction does, they deliberately pair the prefix
+  mutation with forced full-sweep compaction: focus compacts before brief
+  generation, while unfocus compacts after deactivation.
 
 ## Phase 1: Slash Command Generates A Draft Brief
 
@@ -177,6 +184,10 @@ Make active focus mode affect assembled context.
 - Ensure compaction never reads focus brief rows as source material.
 - Promote successful `/lossless focus <prompt>` generations to active overlays.
 - Make `/lossless unfocus` deactivate active overlays without deleting brief history.
+- Run forced full-sweep compaction before focus generation so the delegated
+  subagent reads the freshest balanced summary frontier.
+- Run forced full-sweep compaction after unfocus so the normal DAG view is
+  restored with the same cache break that removed the overlay.
 
 ### Acceptance Criteria
 
