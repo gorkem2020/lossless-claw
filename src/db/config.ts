@@ -55,6 +55,12 @@ export type AutoRotateSessionFilesConfig = {
   runtime: AutoRotateSessionFileMode;
 };
 
+export type IndependentLogFileConfig = {
+  enabled: boolean;
+  file?: string;
+  maxFileBytes: number;
+};
+
 export type LcmConfigSource = "env" | "plugin-config" | "default";
 
 export type LcmConfigDiagnostics = {
@@ -147,6 +153,8 @@ export type LcmConfig = {
   proactiveThresholdCompactionMode: ProactiveThresholdCompactionMode;
   /** Automatically rotate LCM-managed session JSONL files that exceed a size ceiling. */
   autoRotateSessionFiles: AutoRotateSessionFilesConfig;
+  /** Lossless-owned JSONL log file, written in addition to the OpenClaw runtime logger. */
+  independentLogFile: IndependentLogFileConfig;
   /** Hard ceiling for assembly token budget — caps runtime-provided and fallback budgets. */
   maxAssemblyTokenBudget?: number;
   /** Maximum allowed overage factor for summaries relative to target tokens (default 3). */
@@ -414,6 +422,7 @@ export function resolveLcmConfigWithDiagnostics(
   const cacheAwareCompaction = toRecord(pc.cacheAwareCompaction);
   const dynamicLeafChunkTokens = toRecord(pc.dynamicLeafChunkTokens);
   const autoRotateSessionFiles = toRecord(pc.autoRotateSessionFiles);
+  const independentLogFile = toRecord(pc.independentLogFile);
   const proactiveThresholdCompactionMode = toProactiveThresholdCompactionMode(
     env.LCM_PROACTIVE_THRESHOLD_COMPACTION_MODE,
   ) ?? toProactiveThresholdCompactionMode(pc.proactiveThresholdCompactionMode) ?? "deferred";
@@ -649,6 +658,17 @@ export function resolveLcmConfigWithDiagnostics(
           toAutoRotateSessionFileMode(env.LCM_AUTO_ROTATE_SESSION_FILES_RUNTIME)
             ?? toAutoRotateSessionFileMode(autoRotateSessionFiles?.runtime)
             ?? "rotate",
+      },
+      independentLogFile: {
+        enabled:
+          env.LCM_LOG_FILE_ENABLED !== undefined
+            ? env.LCM_LOG_FILE_ENABLED !== "false"
+            : toBool(independentLogFile?.enabled) ?? true,
+        file: env.LCM_LOG_FILE?.trim() ?? toStr(independentLogFile?.file),
+        maxFileBytes:
+          toPositiveInteger(parseFiniteInt(env.LCM_LOG_MAX_FILE_BYTES))
+            ?? toPositiveInteger(toNumber(independentLogFile?.maxFileBytes))
+            ?? 100 * 1024 * 1024,
       },
       maxAssemblyTokenBudget:
         parseFiniteInt(env.LCM_MAX_ASSEMBLY_TOKEN_BUDGET)

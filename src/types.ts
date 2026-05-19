@@ -177,5 +177,7 @@ export interface LcmDependencies {
     warn: (msg: string) => void;
     error: (msg: string) => void;
     debug: (msg: string) => void;
+    hostInfo?: (msg: string) => void;
+    hostWarn?: (msg: string) => void;
   };
 }

@@ -66,6 +66,10 @@ function createTestConfig(databasePath: string): LcmConfig {
       startup: "rotate",
       runtime: "rotate",
     },
+    independentLogFile: {
+      enabled: false,
+      maxFileBytes: 100 * 1024 * 1024,
+    },
     summaryMaxOverageFactor: 3,
     expansionProvider: "",
     expansionModel: "",

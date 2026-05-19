@@ -1181,8 +1181,8 @@ function createLcmDependencies(
   const envSnapshot = snapshotPluginEnv();
   envSnapshot.openclawDefaultModel = readDefaultModelFromConfig(registrationConfig.openClawConfig);
   const pluginConfig = registrationConfig.pluginConfig;
-  const log = createLcmLogger(api);
   const { config, diagnostics } = resolveLcmConfigWithDiagnostics(process.env, pluginConfig);
+  const log = createLcmLogger(api, config);
 
   if (diagnostics.ignoreSessionPatternsEnvOverridesPluginConfig) {
     logStartupBannerOnce({
@@ -1215,12 +1215,12 @@ function createLcmDependencies(
 
   logStartupBannerOnce({
     key: "transcript-gc-enabled",
-    log: (message) => log.info(message),
+    log: (message) => (log.hostInfo ?? log.info)(message),
     message: `[lcm] Transcript GC ${config.transcriptGcEnabled ? "enabled" : "disabled"} (default false)`,
   });
   logStartupBannerOnce({
     key: "proactive-threshold-compaction-mode",
-    log: (message) => log.info(message),
+    log: (message) => (log.hostInfo ?? log.info)(message),
     message: `[lcm] Proactive threshold compaction mode: ${config.proactiveThresholdCompactionMode} (default deferred)`,
   });
 
@@ -1808,7 +1808,7 @@ const lcmPlugin = {
       }
 
       if (recovered > 0) {
-        deps.log.info(
+        (deps.log.hostInfo ?? deps.log.info)(
           `[lcm] startup totalTokens recovery updated ${recovered} session ${recovered === 1 ? "entry" : "entries"}`,
         );
       }
@@ -1832,7 +1832,7 @@ const lcmPlugin = {
         database = nextDatabase;
         lcm = nextEngine;
         initError = null;
-        deps.log.info(
+        (deps.log.hostInfo ?? deps.log.info)(
           `[lcm] Engine initialized for db=${normalizedDbPath} duration=${Date.now() - startedAt}ms`,
         );
         scheduleStartupAutoRotate(nextEngine);
@@ -1840,7 +1840,7 @@ const lcmPlugin = {
         return nextEngine;
       } catch (error) {
         closeLcmConnection(nextDatabase);
-        deps.log.info(
+        (deps.log.hostWarn ?? deps.log.warn)(
           `[lcm] Engine init failed for db=${normalizedDbPath} duration=${Date.now() - startedAt}ms error=${toInitError(error).message}`,
         );
         throw error;
@@ -1972,17 +1972,17 @@ const lcmPlugin = {
 
     logStartupBannerOnce({
       key: "plugin-loaded",
-      log: (message) => deps.log.info(message),
+      log: (message) => (deps.log.hostInfo ?? deps.log.info)(message),
       message: `[lcm] Plugin loaded (enabled=${deps.config.enabled}, db=${deps.config.databasePath}, threshold=${deps.config.contextThreshold}, proactiveThresholdCompactionMode=${deps.config.proactiveThresholdCompactionMode})`,
     });
     logStartupBannerOnce({
       key: "state-dir",
-      log: (message) => deps.log.info(message),
+      log: (message) => (deps.log.hostInfo ?? deps.log.info)(message),
       message: `[lcm] State dir: ${resolveOpenclawStateDir(process.env)}`,
     });
     logStartupBannerOnce({
       key: "compaction-model",
-      log: (message) => deps.log.info(message),
+      log: (message) => (deps.log.hostInfo ?? deps.log.info)(message),
       message: buildCompactionModelLog({
         config: deps.config,
         openClawConfig: registrationConfig.openClawConfig,
@@ -1992,7 +1992,7 @@ const lcmPlugin = {
     if (deps.config.fallbackProviders.length > 0) {
       logStartupBannerOnce({
         key: "fallback-providers",
-        log: (message) => deps.log.info(message),
+        log: (message) => (deps.log.hostInfo ?? deps.log.info)(message),
         message: `[lcm] Fallback providers: ${deps.config.fallbackProviders.map((fp) => `${fp.provider}/${fp.model}`).join(", ")}`,
       });
     }

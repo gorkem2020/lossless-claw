@@ -3720,7 +3720,7 @@ export class LcmContextEngine implements ContextEngine {
       );
       logStartupBannerOnce({
         key: "ignore-session-patterns",
-        log: (message) => this.deps.log.info(message),
+        log: (message) => (this.deps.log.hostInfo ?? this.deps.log.info)(message),
         message: `[lcm] Ignoring sessions matching ${this.config.ignoreSessionPatterns.length} pattern(s) from ${source}: ${this.config.ignoreSessionPatterns.join(", ")}`,
       });
     }
@@ -3731,7 +3731,7 @@ export class LcmContextEngine implements ContextEngine {
       const enforcement = this.config.skipStatelessSessions ? "" : " (skipStatelessSessions=false)";
       logStartupBannerOnce({
         key: "stateless-session-patterns",
-        log: (message) => this.deps.log.info(message),
+        log: (message) => (this.deps.log.hostInfo ?? this.deps.log.info)(message),
         message: `[lcm] Stateless session patterns${enforcement} from ${source}: ${this.config.statelessSessionPatterns.length} pattern(s): ${this.config.statelessSessionPatterns.join(", ")}`,
       });
     }

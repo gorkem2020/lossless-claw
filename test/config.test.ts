@@ -751,6 +751,18 @@ describe("resolveLcmConfig", () => {
     });
   });
 
+  it("ships a manifest with independentLogFile in schema", () => {
+    expect(manifest.configSchema.properties.independentLogFile).toEqual({
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean" },
+        file: { type: "string" },
+        maxFileBytes: { type: "integer", minimum: 1 },
+      },
+    });
+  });
+
   it("ships a manifest with cacheAwareCompaction in schema", () => {
     expect(manifest.configSchema.properties.cacheAwareCompaction).toEqual({
       type: "object",
@@ -835,6 +847,41 @@ describe("resolveLcmConfig", () => {
     expect(config.delegationTimeoutMs).toBe(120000);
     expect(config.summaryMaxOverageFactor).toBe(3);
     expect(config.maxAssemblyTokenBudget).toBeUndefined();
+    expect(config.independentLogFile).toEqual({
+      enabled: true,
+      file: undefined,
+      maxFileBytes: 100 * 1024 * 1024,
+    });
+  });
+
+  it("resolves independent log file config from plugin config and env overrides", () => {
+    expect(resolveLcmConfig({}, {
+      independentLogFile: {
+        enabled: false,
+        file: "/tmp/custom-lcm.log",
+        maxFileBytes: 1234,
+      },
+    }).independentLogFile).toEqual({
+      enabled: false,
+      file: "/tmp/custom-lcm.log",
+      maxFileBytes: 1234,
+    });
+
+    expect(resolveLcmConfig({
+      LCM_LOG_FILE_ENABLED: "true",
+      LCM_LOG_FILE: "/tmp/env-lcm.log",
+      LCM_LOG_MAX_FILE_BYTES: "5678",
+    } as NodeJS.ProcessEnv, {
+      independentLogFile: {
+        enabled: false,
+        file: "/tmp/plugin-lcm.log",
+        maxFileBytes: 1234,
+      },
+    }).independentLogFile).toEqual({
+      enabled: true,
+      file: "/tmp/env-lcm.log",
+      maxFileBytes: 5678,
+    });
   });
 
   it("ignores non-positive replay flood thresholds from env and plugin config", () => {

@@ -285,6 +285,18 @@
       "label": "Runtime Auto-Rotate",
       "help": "Runtime behavior for oversized current LCM session files: rotate, warn, or off"
     },
+    "independentLogFile.enabled": {
+      "label": "Independent Log File",
+      "help": "Write lossless-claw JSONL logs to a plugin-owned file in addition to OpenClaw's runtime logger"
+    },
+    "independentLogFile.file": {
+      "label": "Independent Log Path",
+      "help": "Optional lossless-claw log path; defaults to /tmp/openclaw/lossless-claw-YYYY-MM-DD.log with daily rollover"
+    },
+    "independentLogFile.maxFileBytes": {
+      "label": "Independent Log Max Bytes",
+      "help": "Byte threshold for size rotation of the current lossless-claw log file (default: 104857600)"
+    },
     "fallbackProviders": {
       "label": "Fallback Providers",
       "help": "Explicit runtime LLM fallback provider/model pairs for compaction summarization; entries require plugins.entries.lossless-claw.llm policy"
@@ -570,6 +582,22 @@
               "warn",
               "off"
             ]
+          }
+        }
+      },
+      "independentLogFile": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "file": {
+            "type": "string"
+          },
+          "maxFileBytes": {
+            "type": "integer",
+            "minimum": 1
           }
         }
       },
