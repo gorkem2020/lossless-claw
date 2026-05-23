@@ -1010,11 +1010,6 @@ function createLcmDependencies(
   }
 
   logStartupBannerOnce({
-    key: "transcript-gc-enabled",
-    log: (message) => log.info(message),
-    message: `[lcm] Transcript GC ${config.transcriptGcEnabled ? "enabled" : "disabled"} (default false)`,
-  });
-  logStartupBannerOnce({
     key: "proactive-threshold-compaction-mode",
     log: (message) => log.info(message),
     message: `[lcm] Proactive threshold compaction mode: ${config.proactiveThresholdCompactionMode} (default deferred)`,
