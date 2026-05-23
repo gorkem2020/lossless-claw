@@ -5274,6 +5274,199 @@ export class LcmContextEngine implements ContextEngine {
     );
   }
 
+  private async deduplicateAfterTurnBatch(
+    sessionId: string,
+    sessionKey: string | undefined,
+    batch: AgentMessage[],
+    options?: { oversizedNoOverlap?: "ingest" | "skip" },
+  ): Promise<AgentMessage[]> {
+    if (batch.length === 0) {
+      return batch;
+    }
+
+    const conversation = await this.conversationStore.getConversationForSession({
+      sessionId,
+      sessionKey,
+    });
+    if (!conversation) {
+      return batch;
+    }
+
+    const conversationId = conversation.conversationId;
+    const storedMessageCount = await this.conversationStore.getMessageCount(conversationId);
+    if (storedMessageCount === 0) {
+      return batch;
+    }
+
+    const lastDbMessage = await this.conversationStore.getLastMessage(conversationId);
+    if (!lastDbMessage) {
+      return batch;
+    }
+
+    const storedBatch = batch.map((message) => toStoredMessage(message));
+    if (storedMessageCount > batch.length) {
+      return this.deduplicateOversizedBatch(
+        conversationId,
+        batch,
+        storedBatch,
+        storedMessageCount,
+        lastDbMessage,
+        options,
+      );
+    }
+
+    const batchAtBoundary = storedBatch[storedMessageCount - 1];
+    if (!batchAtBoundary) {
+      return batch;
+    }
+    if (
+      messageIdentity(lastDbMessage.role, lastDbMessage.content) !==
+      messageIdentity(batchAtBoundary.role, batchAtBoundary.content)
+    ) {
+      return this.deduplicateSuffixFallback(
+        conversationId,
+        batch,
+        storedBatch,
+        storedMessageCount,
+        "prefix-mismatch",
+      );
+    }
+
+    const storedMessages = await this.conversationStore.getMessages(conversationId, {
+      limit: storedMessageCount,
+    });
+    if (storedMessages.length !== storedMessageCount) {
+      return batch;
+    }
+    for (let i = 0; i < storedMessageCount; i += 1) {
+      const storedConversationMessage = storedMessages[i];
+      const incomingMessage = storedBatch[i];
+      if (
+        !storedConversationMessage ||
+        !incomingMessage ||
+        messageIdentity(storedConversationMessage.role, storedConversationMessage.content) !==
+          messageIdentity(incomingMessage.role, incomingMessage.content)
+      ) {
+        return batch;
+      }
+    }
+
+    return batch.slice(storedMessageCount);
+  }
+
+  private async deduplicateOversizedBatch(
+    conversationId: number,
+    batch: AgentMessage[],
+    storedBatch: ReturnType<typeof toStoredMessage>[],
+    storedMessageCount: number,
+    lastDbMessage: { role: string; content: string },
+    options?: { oversizedNoOverlap?: "ingest" | "skip" },
+  ): Promise<AgentMessage[]> {
+    const lastStoredBatch = storedBatch[storedBatch.length - 1];
+    if (!lastStoredBatch) {
+      return batch;
+    }
+    const lastBatchIdentity = messageIdentity(lastStoredBatch.role, lastStoredBatch.content);
+    const lastDbIdentity = messageIdentity(lastDbMessage.role, lastDbMessage.content);
+
+    if (lastDbIdentity === lastBatchIdentity) {
+      const storedMessages = await this.conversationStore.getMessages(conversationId, {
+        limit: storedMessageCount,
+      });
+      const tailMessages = storedMessages.slice(-batch.length);
+      if (tailMessages.length === batch.length) {
+        let tailMatch = true;
+        for (let i = 0; i < batch.length; i += 1) {
+          if (
+            messageIdentity(tailMessages[i]!.role, tailMessages[i]!.content) !==
+            messageIdentity(storedBatch[i]!.role, storedBatch[i]!.content)
+          ) {
+            tailMatch = false;
+            break;
+          }
+        }
+        if (tailMatch) {
+          this.deps.log.debug(
+            `[lcm] dedup: tail-match detected, batch already fully stored ` +
+              `(storedCount=${storedMessageCount} batchLen=${batch.length}), skipping entire batch`,
+          );
+          return [];
+        }
+      }
+    }
+
+    return this.deduplicateSuffixFallback(
+      conversationId,
+      batch,
+      storedBatch,
+      storedMessageCount,
+      "oversized",
+      { onNoOverlap: options?.oversizedNoOverlap ?? "skip" },
+    );
+  }
+
+  private async deduplicateSuffixFallback(
+    conversationId: number,
+    batch: AgentMessage[],
+    storedBatch: ReturnType<typeof toStoredMessage>[],
+    storedMessageCount: number,
+    context: string,
+    options?: { onNoOverlap?: "ingest" | "skip" },
+  ): Promise<AgentMessage[]> {
+    const allStored = await this.conversationStore.getMessages(conversationId, {
+      limit: storedMessageCount,
+    });
+    if (allStored.length === 0) {
+      return batch;
+    }
+
+    const lastStoredIdentity = messageIdentity(
+      allStored[allStored.length - 1]!.role,
+      allStored[allStored.length - 1]!.content,
+    );
+
+    for (let k = batch.length - 1; k >= 0; k -= 1) {
+      if (messageIdentity(storedBatch[k]!.role, storedBatch[k]!.content) !== lastStoredIdentity) {
+        continue;
+      }
+      const matchLen = Math.min(k + 1, allStored.length);
+      const startDb = allStored.length - matchLen;
+      let suffixMatch = true;
+      for (let j = 0; j < matchLen; j += 1) {
+        if (
+          messageIdentity(allStored[startDb + j]!.role, allStored[startDb + j]!.content) !==
+          messageIdentity(storedBatch[k - matchLen + 1 + j]!.role, storedBatch[k - matchLen + 1 + j]!.content)
+        ) {
+          suffixMatch = false;
+          break;
+        }
+      }
+      const newSlice = batch.slice(k + 1);
+      if (suffixMatch && (newSlice.length > 0 || matchLen > 1)) {
+        this.deps.log.debug(
+          `[lcm] dedup: ${context} suffix-match at batch[${k}], ` +
+            `returning ${newSlice.length} new messages ` +
+            `(storedCount=${storedMessageCount} batchLen=${batch.length})`,
+        );
+        return newSlice;
+      }
+    }
+
+    if (options?.onNoOverlap === "skip") {
+      this.deps.log.warn(
+        `[lcm] dedup: ${context}, storedCount=${storedMessageCount} batchLen=${batch.length}, ` +
+          `no overlap found — fail-closed skipping full batch`,
+      );
+      return [];
+    }
+
+    this.deps.log.warn(
+      `[lcm] dedup: ${context}, storedCount=${storedMessageCount} batchLen=${batch.length}, ` +
+        `no overlap found — ingesting full batch`,
+    );
+    return batch;
+  }
+
   async afterTurn(params: {
     sessionId: string;
     sessionKey?: string;
