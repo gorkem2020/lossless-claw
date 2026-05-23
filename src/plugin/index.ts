@@ -25,7 +25,6 @@ import type {
   LcmDependencies,
   RuntimeLlmCompleteFn,
   RuntimeLlmModelOverride,
-  StartupSessionFileCandidate,
 } from "../types.js";
 
 /** Parse `agent:<agentId>:<suffix...>` session keys. */
@@ -54,7 +53,6 @@ function normalizeAgentId(agentId: string | undefined): string {
 
 type RuntimeSessionStoreEntry = {
   sessionId?: unknown;
-  sessionFile?: unknown;
   totalTokens?: unknown;
   totalTokensFresh?: unknown;
   inputTokens?: unknown;
@@ -71,11 +69,6 @@ type RuntimeSessionStoreEntry = {
 type RuntimeAgentSessionApi = {
   resolveStorePath: (store?: string, opts?: { agentId?: string }) => string;
   loadSessionStore: (storePath: string) => Record<string, RuntimeSessionStoreEntry | undefined>;
-  resolveSessionFilePath: (
-    sessionId: string,
-    entry?: RuntimeSessionStoreEntry,
-    opts?: { agentId?: string; storePath?: string },
-  ) => string;
 };
 type RuntimeAgentSessionApiCandidate = Partial<RuntimeAgentSessionApi>;
 
@@ -111,34 +104,11 @@ function getRuntimeAgentSessionApi(api: OpenClawPluginApi): RuntimeAgentSessionA
   }
   if (
     typeof sessionApi.resolveStorePath !== "function" ||
-    typeof sessionApi.loadSessionStore !== "function" ||
-    typeof sessionApi.resolveSessionFilePath !== "function"
+    typeof sessionApi.loadSessionStore !== "function"
   ) {
     return undefined;
   }
   return sessionApi as RuntimeAgentSessionApi;
-}
-
-/** List configured OpenClaw agent ids whose session stores can be active at startup. */
-function listConfiguredAgentIds(config: unknown): string[] {
-  const agents = isRecord(config) ? config.agents : undefined;
-  const list = isRecord(agents) && Array.isArray(agents.list) ? agents.list : [];
-  const seen = new Set<string>();
-  const ids: string[] = [];
-
-  for (const entry of list) {
-    if (!isRecord(entry) || entry.enabled === false || typeof entry.id !== "string") {
-      continue;
-    }
-    const agentId = normalizeAgentId(entry.id);
-    if (seen.has(agentId)) {
-      continue;
-    }
-    seen.add(agentId);
-    ids.push(agentId);
-  }
-
-  return ids.length > 0 ? ids : ["main"];
 }
 
 /** Read a string value from an unknown object field. */
@@ -1031,9 +1001,10 @@ function createLcmDependencies(
   const runtimeLlmUnavailableError = buildRuntimeLlmUnavailableError();
   if (!getRuntimeLlm(api)) {
     logStartupBannerOnce({
-      key: "runtime-llm-unavailable",
-      log: (message) => log.warn(message),
-      message: runtimeLlmUnavailableError.message ?? "[lcm] OpenClaw runtime.llm.complete is unavailable.",
+      key: "plugin-runtime-llm-unavailable",
+      log: (message) => log.debug(message),
+      message:
+        "[lcm] Plugin-wide runtime.llm.complete is unavailable; context-engine runs will use host-bound runtime.llm.complete when supplied.",
     });
   }
 
@@ -1237,120 +1208,6 @@ function createLcmDependencies(
         return undefined;
       }
     },
-    resolveSessionTranscriptFile: async ({ sessionId, sessionKey }) => {
-      const normalizedSessionId = sessionId.trim();
-      if (!normalizedSessionId) {
-        return undefined;
-      }
-
-      try {
-        const sessionApi = getRuntimeAgentSessionApi(api);
-        if (!sessionApi) {
-          return undefined;
-        }
-        const cfg = readRuntimeConfigSnapshot(api);
-        const sessionConfig = isRecord(cfg) && isRecord(cfg.session) ? cfg.session : undefined;
-        const normalizedSessionKey = sessionKey?.trim();
-        const parsed = normalizedSessionKey ? parseAgentSessionKey(normalizedSessionKey) : null;
-        const agentId = normalizeAgentId(parsed?.agentId);
-        const storePath = sessionApi.resolveStorePath(getStringField(sessionConfig, "store"), {
-          agentId,
-        });
-        const store = sessionApi.loadSessionStore(storePath) as Record<
-          string,
-          { sessionId?: string; sessionFile?: string } | undefined
-        >;
-        const entry =
-          (normalizedSessionKey ? store[normalizedSessionKey] : undefined)
-          ?? Object.values(store).find((candidate) => candidate?.sessionId === normalizedSessionId);
-        const transcriptPath = sessionApi.resolveSessionFilePath(
-          normalizedSessionId,
-          entry,
-          {
-            agentId,
-            storePath,
-          },
-        );
-        return transcriptPath.trim() || undefined;
-      } catch {
-        return undefined;
-      }
-    },
-    listStartupSessionFileCandidates: async () => {
-      const sessionApi = getRuntimeAgentSessionApi(api);
-      if (!sessionApi) {
-        return [];
-      }
-
-      let cfg: unknown = registrationConfig.openClawConfig;
-      try {
-        const liveConfig = readRuntimeConfigSnapshot(api);
-        if (liveConfig !== undefined) {
-          cfg = liveConfig;
-        }
-      } catch {
-        // Fall back to the registration config snapshot when live config is unavailable.
-      }
-
-      const sessionConfig = isRecord(cfg) && isRecord(cfg.session) ? cfg.session : undefined;
-      const storeConfig = getStringField(sessionConfig, "store");
-      const candidates: StartupSessionFileCandidate[] = [];
-      const seen = new Set<string>();
-
-      for (const agentId of listConfiguredAgentIds(cfg)) {
-        let storePath: string;
-        let store: Record<string, RuntimeSessionStoreEntry | undefined>;
-        try {
-          storePath = sessionApi.resolveStorePath(storeConfig, { agentId });
-          store = sessionApi.loadSessionStore(storePath);
-        } catch {
-          continue;
-        }
-
-        for (const [rawSessionKey, rawEntry] of Object.entries(store)) {
-          const sessionKey = rawSessionKey.trim();
-          if (!sessionKey || !isRecord(rawEntry)) {
-            continue;
-          }
-          const parsed = parseAgentSessionKey(sessionKey);
-          if (parsed?.agentId && normalizeAgentId(parsed.agentId) !== agentId) {
-            continue;
-          }
-          const sessionId = getStringField(rawEntry, "sessionId");
-          if (!sessionId) {
-            continue;
-          }
-
-          let sessionFile: string;
-          try {
-            sessionFile = sessionApi.resolveSessionFilePath(sessionId, rawEntry, {
-              agentId,
-              storePath,
-            }).trim();
-          } catch {
-            continue;
-          }
-          if (!sessionFile) {
-            continue;
-          }
-
-          const dedupeKey = `${sessionId}\0${sessionKey}\0${sessionFile}`;
-          if (seen.has(dedupeKey)) {
-            continue;
-          }
-          seen.add(dedupeKey);
-          candidates.push({
-            sessionId,
-            sessionKey,
-            sessionFile,
-            agentId,
-            storePath,
-          });
-        }
-      }
-
-      return candidates;
-    },
     agentLaneSubagent: "subagent",
     log,
   };
@@ -1466,15 +1323,6 @@ const lcmPlugin = {
     /** Normalize unknown failures into stable Error instances. */
     function toInitError(error: unknown): Error {
       return error instanceof Error ? error : new Error(String(error));
-    }
-
-    /** Start the non-blocking startup scan for oversized LCM-managed transcripts. */
-    function scheduleStartupAutoRotate(nextEngine: LcmContextEngine): void {
-      void nextEngine.autoRotateManagedSessionFilesAtStartup().catch((error) => {
-        deps.log.warn(
-          `[lcm] auto-rotate: phase=startup action=warn durationMs=0 reason=startup-scan-failed error=${describeLogError(error).replace(/\s+/g, "_")}`,
-        );
-      });
     }
 
     /** Recover session-store totalTokens for active conversations after restart. */
@@ -1629,7 +1477,6 @@ const lcmPlugin = {
         deps.log.info(
           `[lcm] Engine initialized for db=${normalizedDbPath} duration=${Date.now() - startedAt}ms`,
         );
-        scheduleStartupAutoRotate(nextEngine);
         scheduleStartupSessionTotalTokensRecovery(nextEngine);
         return nextEngine;
       } catch (error) {

@@ -2752,6 +2752,38 @@ describe("LcmContextEngine.ingest content extraction", () => {
     });
   });
 
+  it("maintain() consumes deferred compaction without requiring a transcript path", async () => {
+    const engine = createEngineWithConfig({
+      transcriptGcEnabled: true,
+    });
+    const sessionId = "maintain-sqlite-no-path";
+    const rewriteTranscriptEntries = vi.fn();
+
+    await engine.ingest({
+      sessionId,
+      message: makeMessage({ role: "user", content: "keep LCM active" }),
+    });
+
+    const result = await engine.maintain({
+      sessionId,
+      transcriptScope: {
+        agentId: "main",
+        sessionId,
+      },
+      runtimeContext: {
+        rewriteTranscriptEntries,
+      },
+    });
+
+    expect(result).toEqual({
+      changed: false,
+      bytesFreed: 0,
+      rewrittenEntries: 0,
+      reason: "transcript file unavailable",
+    });
+    expect(rewriteTranscriptEntries).not.toHaveBeenCalled();
+  });
+
   it("serializes recycled session writes by stable sessionKey", async () => {
     const engine = createEngine();
     const sessionKey = "agent:main:main";
@@ -2849,6 +2881,38 @@ describe("LcmContextEngine connection lifecycle", () => {
 // ── Bootstrap ───────────────────────────────────────────────────────────────
 
 describe("LcmContextEngine.bootstrap", () => {
+  it("bootstraps from runtime messages when SQLite host has no transcript path", async () => {
+    const engine = createEngine();
+    const sessionId = "bootstrap-sqlite-no-path";
+    const result = await engine.bootstrap({
+      sessionId,
+      transcriptScope: {
+        agentId: "main",
+        sessionId,
+      },
+      messages: [
+        makeMessage({ role: "user", content: "sqlite user" }),
+        makeMessage({ role: "assistant", content: "sqlite assistant" }),
+      ],
+    });
+
+    expect(result).toEqual({
+      bootstrapped: true,
+      importedMessages: 2,
+      reason: "bootstrapped from runtime messages",
+    });
+
+    const conversation = await engine.getConversationStore().getConversationBySessionId(sessionId);
+    expect(conversation).not.toBeNull();
+    expect(conversation!.bootstrappedAt).not.toBeNull();
+
+    const stored = await engine.getConversationStore().getMessages(conversation!.conversationId);
+    expect(stored.map((message) => message.content)).toEqual([
+      "sqlite user",
+      "sqlite assistant",
+    ]);
+  });
+
   it("imports only active leaf-path messages from SessionManager context", async () => {
     const sessionFile = createSessionFilePath("branched");
     const sm = SessionManager.open(sessionFile);
@@ -10080,6 +10144,33 @@ describe("LcmContextEngine fidelity and token budget", () => {
 // ── afterTurn dedup guard ────────────────────────────────────────────────────
 
 describe("LcmContextEngine afterTurn dedup guard", () => {
+  it("ingests runtime messages when SQLite host has no transcript path", async () => {
+    const engine = createEngine();
+    const sessionId = "after-turn-sqlite-no-path";
+
+    await engine.afterTurn({
+      sessionId,
+      transcriptScope: {
+        agentId: "main",
+        sessionId,
+      },
+      messages: [
+        makeMessage({ role: "user", content: "runtime question" }),
+        makeMessage({ role: "assistant", content: "runtime answer" }),
+      ],
+      prePromptMessageCount: 0,
+      tokenBudget: 4096,
+    });
+
+    const conversation = await engine.getConversationStore().getConversationBySessionId(sessionId);
+    expect(conversation).not.toBeNull();
+    const stored = await engine.getConversationStore().getMessages(conversation!.conversationId);
+    expect(stored.map((message) => message.content)).toEqual([
+      "runtime question",
+      "runtime answer",
+    ]);
+  });
+
   it("ingests all messages when no prior conversation exists (new session)", async () => {
     const infoLog = vi.fn();
     const engine = createEngineWithDepsOverrides({

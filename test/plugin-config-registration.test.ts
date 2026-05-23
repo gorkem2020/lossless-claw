@@ -933,8 +933,8 @@ describe("lcm plugin registration", () => {
       expect.not.arrayContaining([expect.stringContaining("[lcm] Migration successful")]),
     );
   });
-  it("registers with a clear warning when runtime.llm is unavailable", () => {
-    const { api, getFactory, warnLog } = buildApi(
+  it("registers with a debug note when plugin-wide runtime.llm is unavailable", () => {
+    const { api, getFactory, debugLog, warnLog } = buildApi(
       {
         enabled: true,
       },
@@ -944,7 +944,10 @@ describe("lcm plugin registration", () => {
 
     expect(() => lcmPlugin.register(api)).not.toThrow();
     expect(getFactory()).toBeTypeOf("function");
-    expect(warnLog).toHaveBeenCalledWith(
+    expect(debugLog).toHaveBeenCalledWith(
+      expect.stringContaining("Plugin-wide runtime.llm.complete is unavailable"),
+    );
+    expect(warnLog).not.toHaveBeenCalledWith(
       expect.stringContaining("runtime.llm.complete is unavailable"),
     );
   });

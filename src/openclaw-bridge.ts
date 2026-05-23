@@ -111,12 +111,27 @@ export type AgentMessage = {
   isError?: boolean;
 };
 
+export type ContextEngineTranscriptScope = {
+  agentId: string;
+  path?: string;
+  sessionId: string;
+};
+
+export type ContextEngineRuntimeContext = Record<string, unknown> & {
+  transcriptScope?: ContextEngineTranscriptScope;
+  llm?: {
+    complete: (...args: any[]) => Promise<any>;
+  };
+  rewriteTranscriptEntries?: (...args: any[]) => Promise<any>;
+};
+
 export type ContextEngine = {
   info: ContextEngineInfo;
   bootstrap(params: {
     sessionId: string;
     sessionKey?: string;
     sessionFile?: string;
+    transcriptScope?: ContextEngineTranscriptScope;
     messages?: AgentMessage[];
   }): Promise<BootstrapResult>;
   ingest(params: {
@@ -137,15 +152,41 @@ export type ContextEngine = {
     tokenBudget?: number;
     prompt?: string;
   }): Promise<AssembleResult>;
+  afterTurn?(params: {
+    sessionId: string;
+    sessionKey?: string;
+    sessionFile?: string;
+    transcriptScope?: ContextEngineTranscriptScope;
+    messages: AgentMessage[];
+    prePromptMessageCount: number;
+    autoCompactionSummary?: string;
+    isHeartbeat?: boolean;
+    tokenBudget?: number;
+    runtimeContext?: ContextEngineRuntimeContext;
+    legacyCompactionParams?: Record<string, unknown>;
+  }): Promise<void>;
+  maintain?(params: {
+    sessionId: string;
+    sessionKey?: string;
+    sessionFile?: string;
+    transcriptScope?: ContextEngineTranscriptScope;
+    runtimeContext?: ContextEngineRuntimeContext;
+  }): Promise<{
+    changed: boolean;
+    bytesFreed: number;
+    rewrittenEntries: number;
+    reason?: string;
+  }>;
   compact(params: {
     sessionId: string;
     sessionKey?: string;
     sessionFile?: string;
+    transcriptScope?: ContextEngineTranscriptScope;
     tokenBudget?: number;
     currentTokenCount?: number;
     compactionTarget?: "budget" | "threshold";
     customInstructions?: string;
-    runtimeContext?: Record<string, unknown>;
+    runtimeContext?: ContextEngineRuntimeContext;
     legacyParams?: Record<string, unknown>;
     force?: boolean;
   }): Promise<CompactResult>;

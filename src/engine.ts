@@ -10,6 +10,8 @@ import type {
   ContextEngine,
   ContextEngineInfo,
   ContextEngineHostCapability,
+  ContextEngineRuntimeContext,
+  ContextEngineTranscriptScope,
   AssembleResult,
   BootstrapResult,
   CompactResult,
@@ -80,6 +82,32 @@ import { sanitizeToolUseResultPairing } from "./transcript-repair.js";
 
 type AgentMessage = Parameters<ContextEngine["ingest"]>[0]["message"];
 
+type TranscriptBoundParams = {
+  sessionFile?: string;
+  transcriptScope?: ContextEngineTranscriptScope;
+  runtimeContext?: ContextEngineRuntimeContext | Record<string, unknown>;
+};
+
+/** Resolve the host transcript file path when this OpenClaw runtime still exposes one. */
+function resolveTranscriptFilePath(params: TranscriptBoundParams): string | undefined {
+  const direct = params.sessionFile?.trim();
+  if (direct) {
+    return direct;
+  }
+  const scoped = params.transcriptScope?.path?.trim();
+  if (scoped) {
+    return scoped;
+  }
+  const runtimeScope = asRecord(params.runtimeContext)?.transcriptScope;
+  if (runtimeScope && typeof runtimeScope === "object" && !Array.isArray(runtimeScope)) {
+    const pathValue = (runtimeScope as { path?: unknown }).path;
+    if (typeof pathValue === "string" && pathValue.trim()) {
+      return pathValue.trim();
+    }
+  }
+  return undefined;
+}
+
 const LOSSLESS_AGENT_RUN_REQUIRED_HOST_CAPABILITIES: ContextEngineHostCapability[] = [
   "bootstrap",
   "assemble-before-prompt",
@@ -145,7 +173,7 @@ type CompactionExecutionParams = {
   conversationId: number;
   sessionId: string;
   sessionKey?: string;
-  tokenBudget: number;
+  tokenBudget?: number;
   currentTokenCount?: number;
   compactionTarget?: "budget" | "threshold";
   customInstructions?: string;
@@ -5729,8 +5757,10 @@ export class LcmContextEngine implements ContextEngine {
 
   async bootstrap(params: {
     sessionId: string;
-    sessionFile: string;
+    sessionFile?: string;
+    transcriptScope?: ContextEngineTranscriptScope;
     sessionKey?: string;
+    messages?: AgentMessage[];
   }): Promise<BootstrapResult> {
     if (this.shouldIgnoreSession({ sessionId: params.sessionId, sessionKey: params.sessionKey })) {
       return {
@@ -5752,7 +5782,57 @@ export class LcmContextEngine implements ContextEngine {
       `session=${params.sessionId}`,
       ...(params.sessionKey?.trim() ? [`sessionKey=${params.sessionKey.trim()}`] : []),
     ].join(" ");
-    const sessionFileStats = await stat(params.sessionFile);
+    const sessionFile = resolveTranscriptFilePath(params);
+    if (!sessionFile) {
+      const bootstrapMessages = trimBootstrapMessagesToBudget(
+        filterPersistableMessages(params.messages ?? []),
+        resolveBootstrapMaxTokens(this.config),
+      );
+      if (bootstrapMessages.length === 0) {
+        this.deps.log.debug(
+          `[lcm] bootstrap: skipped ${sessionLabel} reason=transcript_scope_without_file`,
+        );
+        return {
+          bootstrapped: false,
+          importedMessages: 0,
+          reason: "transcript file unavailable",
+        };
+      }
+
+      let importedMessages = 0;
+      await this.withSessionQueue(
+        this.resolveSessionQueueKey(params.sessionId, params.sessionKey),
+        async () => {
+          const conversation = await this.conversationStore.getOrCreateConversation(
+            params.sessionId,
+            {
+              sessionKey: params.sessionKey,
+            },
+          );
+          for (const message of bootstrapMessages) {
+            const result = await this.ingestSingle({
+              sessionId: params.sessionId,
+              sessionKey: params.sessionKey,
+              message,
+              skipReplayTimestampFloodGuard: true,
+            });
+            if (result.ingested) {
+              importedMessages += 1;
+            }
+          }
+          if (!conversation.bootstrappedAt) {
+            await this.conversationStore.markConversationBootstrapped(conversation.conversationId);
+          }
+        },
+        { operationName: "bootstrap", context: sessionLabel },
+      );
+      return {
+        bootstrapped: importedMessages > 0,
+        importedMessages,
+        reason: importedMessages > 0 ? "bootstrapped from runtime messages" : "conversation already up to date",
+      };
+    }
+    const sessionFileStats = await stat(sessionFile);
     const sessionFileSize = sessionFileStats.size;
     const sessionFileMtimeMs = Math.trunc(sessionFileStats.mtimeMs);
 
@@ -5766,7 +5846,7 @@ export class LcmContextEngine implements ContextEngine {
           ): Promise<void> => {
             await this.refreshBootstrapState({
               conversationId,
-              sessionFile: params.sessionFile,
+              sessionFile,
               fileStats: {
                 size: sessionFileSize,
                 mtimeMs: sessionFileMtimeMs,
@@ -5810,11 +5890,11 @@ export class LcmContextEngine implements ContextEngine {
               const transcriptRotated =
                 typeof trackedSessionFile === "string" &&
                 trackedSessionFile.length > 0 &&
-                trackedSessionFile !== params.sessionFile;
+                trackedSessionFile !== sessionFile;
 
               if (transcriptRotated && trackedSessionFileMissing) {
                 this.deps.log.warn(
-                  `[lcm] bootstrap: detected reset/rollover without prior lifecycle split; rotating conversation=${activeByKey.conversationId} session=${params.sessionId} sessionKey=${normalizedSessionKey} oldSessionId=${activeByKey.sessionId} oldFile=${trackedSessionFile} newFile=${params.sessionFile}`,
+                  `[lcm] bootstrap: detected reset/rollover without prior lifecycle split; rotating conversation=${activeByKey.conversationId} session=${params.sessionId} sessionKey=${normalizedSessionKey} oldSessionId=${activeByKey.sessionId} oldFile=${trackedSessionFile} newFile=${sessionFile}`,
                 );
                 await this.applySessionReplacement({
                   reason: "bootstrap session-file rollover fallback",
@@ -5839,12 +5919,12 @@ export class LcmContextEngine implements ContextEngine {
 
           if (
             bootstrapState &&
-            bootstrapState.sessionFilePath !== params.sessionFile
+            bootstrapState.sessionFilePath !== sessionFile
           ) {
             transcriptEpochRotated = true;
             transcriptEpochReason = "path-mismatch";
             this.deps.log.warn(
-              `[lcm] bootstrap: session file rotated conversation=${conversationId} ${sessionLabel} oldFile=${bootstrapState.sessionFilePath} newFile=${params.sessionFile}`,
+              `[lcm] bootstrap: session file rotated conversation=${conversationId} ${sessionLabel} oldFile=${bootstrapState.sessionFilePath} newFile=${sessionFile}`,
             );
             // A rotated session file invalidates every piece of cached state
             // keyed to the old path: the on-disk bootstrap checkpoint row, the
@@ -5856,13 +5936,13 @@ export class LcmContextEngine implements ContextEngine {
           }
           if (
             bootstrapState &&
-            bootstrapState.sessionFilePath === params.sessionFile &&
+            bootstrapState.sessionFilePath === sessionFile &&
             checkpointIsPastTranscriptEof(bootstrapState, sessionFileSize)
           ) {
             transcriptEpochRotated = true;
             transcriptEpochReason = "same-path-shrink";
             this.deps.log.warn(
-              `[lcm] bootstrap: session file shrank past checkpoint conversation=${conversationId} ${sessionLabel} file=${params.sessionFile} checkpointOffset=${bootstrapState.lastProcessedOffset} checkpointSize=${bootstrapState.lastSeenSize} currentSize=${sessionFileSize}`,
+              `[lcm] bootstrap: session file shrank past checkpoint conversation=${conversationId} ${sessionLabel} file=${sessionFile} checkpointOffset=${bootstrapState.lastProcessedOffset} checkpointSize=${bootstrapState.lastSeenSize} currentSize=${sessionFileSize}`,
             );
             this.lastFullReadFileState.delete(conversationId);
             bootstrapState = null;
@@ -5872,7 +5952,7 @@ export class LcmContextEngine implements ContextEngine {
           // successful bootstrap checkpoint, skip reopening and reparsing it.
           if (
             bootstrapState &&
-            bootstrapState.sessionFilePath === params.sessionFile &&
+            bootstrapState.sessionFilePath === sessionFile &&
             bootstrapState.lastSeenSize === sessionFileSize &&
             bootstrapState.lastSeenMtimeMs === sessionFileMtimeMs
           ) {
@@ -5891,7 +5971,7 @@ export class LcmContextEngine implements ContextEngine {
 
           if (
             bootstrapState &&
-            bootstrapState.sessionFilePath === params.sessionFile &&
+            bootstrapState.sessionFilePath === sessionFile &&
             sessionFileSize > bootstrapState.lastSeenSize &&
             sessionFileMtimeMs >= bootstrapState.lastSeenMtimeMs
           ) {
@@ -5915,7 +5995,7 @@ export class LcmContextEngine implements ContextEngine {
 
             const tailEntryRaw = canTryAppendOnlyFastPath
               ? await readLastJsonlEntryBeforeOffset(
-                  params.sessionFile,
+                  sessionFile,
                   bootstrapState.lastProcessedOffset,
                   true,
                   (message) => createBootstrapEntryHash(toStoredMessage(message)) === frontierHash,
@@ -5932,7 +6012,7 @@ export class LcmContextEngine implements ContextEngine {
               tailEntryHash === bootstrapState.lastProcessedEntryHash
             ) {
               const appended = await readAppendedLeafPathMessages({
-                sessionFile: params.sessionFile,
+                sessionFile,
                 offset: bootstrapState.lastProcessedOffset,
               });
               if (appended.canUseAppendOnly) {
@@ -5948,7 +6028,7 @@ export class LcmContextEngine implements ContextEngine {
                     sessionKey: params.sessionKey,
                   }),
                   source: "bootstrap append-only",
-                  sessionFile: params.sessionFile,
+                  sessionFile,
                 });
 
                 let importedMessages = 0;
@@ -6007,7 +6087,7 @@ export class LcmContextEngine implements ContextEngine {
             }
           }
 
-          const historicalMessages = await readLeafPathMessages(params.sessionFile);
+          const historicalMessages = await readLeafPathMessages(sessionFile);
           this.deps.log.debug(
             `[lcm] bootstrap: full transcript read conversation=${conversationId} ${sessionLabel} existingCount=${existingCount} historicalMessages=${historicalMessages.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
           );
@@ -6152,7 +6232,7 @@ export class LcmContextEngine implements ContextEngine {
           if (pruned > 0) {
             await this.refreshBootstrapState({
               conversationId: conversation.conversationId,
-              sessionFile: params.sessionFile,
+              sessionFile,
             });
             this.deps.log.info(
               `[lcm] bootstrap: retroactively pruned ${pruned} HEARTBEAT_OK messages from conversation ${conversation.conversationId}`,
@@ -6448,16 +6528,21 @@ export class LcmContextEngine implements ContextEngine {
    */
   async maintain(params: {
     sessionId: string;
-    sessionFile: string;
+    sessionFile?: string;
+    transcriptScope?: ContextEngineTranscriptScope;
     sessionKey?: string;
     runtimeContext?: ContextEngineMaintenanceRuntimeContext;
   }): Promise<ContextEngineMaintenanceResult> {
+    const sessionFile = resolveTranscriptFilePath(params);
     const runRuntimeAutoRotate = async (): Promise<void> => {
+      if (!sessionFile) {
+        return;
+      }
       await this.maybeAutoRotateManagedSessionFile({
         phase: "runtime",
         sessionId: params.sessionId,
         sessionKey: params.sessionKey,
-        sessionFile: params.sessionFile,
+        sessionFile,
       });
     };
     if (this.shouldIgnoreSession({ sessionId: params.sessionId, sessionKey: params.sessionKey })) {
@@ -6559,6 +6644,17 @@ export class LcmContextEngine implements ContextEngine {
           );
         }
 
+        if (!sessionFile) {
+          return (
+            deferredCompactionResult ?? {
+              changed: false,
+              bytesFreed: 0,
+              rewrittenEntries: 0,
+              reason: "transcript file unavailable",
+            }
+          );
+        }
+
         const rewriteTranscriptEntries = params.runtimeContext.rewriteTranscriptEntries;
         const candidates = await this.summaryStore.listTranscriptGcCandidates(
           conversation.conversationId,
@@ -6576,9 +6672,7 @@ export class LcmContextEngine implements ContextEngine {
           };
         }
 
-        const transcriptEntryIdsByCallId = listTranscriptToolResultEntryIdsByCallId(
-          params.sessionFile,
-        );
+        const transcriptEntryIdsByCallId = listTranscriptToolResultEntryIdsByCallId(sessionFile);
         const replacements: TranscriptRewriteReplacement[] = [];
         const seenEntryIds = new Set<string>();
 
@@ -6622,7 +6716,7 @@ export class LcmContextEngine implements ContextEngine {
           try {
             await this.refreshBootstrapState({
               conversationId: conversation.conversationId,
-              sessionFile: params.sessionFile,
+              sessionFile,
             });
           } catch (e) {
             this.deps.log.warn(
@@ -6879,23 +6973,28 @@ export class LcmContextEngine implements ContextEngine {
   async afterTurn(params: {
     sessionId: string;
     sessionKey?: string;
-    sessionFile: string;
+    sessionFile?: string;
+    transcriptScope?: ContextEngineTranscriptScope;
     messages: AgentMessage[];
     prePromptMessageCount: number;
     autoCompactionSummary?: string;
     isHeartbeat?: boolean;
     tokenBudget?: number;
     /** OpenClaw runtime param name (preferred). */
-    runtimeContext?: Record<string, unknown>;
+    runtimeContext?: ContextEngineRuntimeContext;
     /** Back-compat param name. */
     legacyCompactionParams?: Record<string, unknown>;
   }): Promise<void> {
+    const sessionFile = resolveTranscriptFilePath(params);
     const runRuntimeAutoRotate = async (): Promise<void> => {
+      if (!sessionFile) {
+        return;
+      }
       await this.maybeAutoRotateManagedSessionFile({
         phase: "runtime",
         sessionId: params.sessionId,
         sessionKey: params.sessionKey,
-        sessionFile: params.sessionFile,
+        sessionFile,
       });
     };
     if (this.shouldIgnoreSession({ sessionId: params.sessionId, sessionKey: params.sessionKey })) {
@@ -6924,15 +7023,21 @@ export class LcmContextEngine implements ContextEngine {
       blockedByImportCap: false,
       hasOverlap: true,
     };
-    try {
-      transcriptReconcileResult = await this.reconcileTranscriptTailForAfterTurn({
-        sessionId: params.sessionId,
-        sessionKey: params.sessionKey,
-        sessionFile: params.sessionFile,
-      });
-    } catch (err) {
-      this.deps.log.warn(
-        `[lcm] afterTurn: transcript reconcile failed for ${sessionLabel}: ${describeLogError(err)}`,
+    if (sessionFile) {
+      try {
+        transcriptReconcileResult = await this.reconcileTranscriptTailForAfterTurn({
+          sessionId: params.sessionId,
+          sessionKey: params.sessionKey,
+          sessionFile,
+        });
+      } catch (err) {
+        this.deps.log.warn(
+          `[lcm] afterTurn: transcript reconcile failed for ${sessionLabel}: ${describeLogError(err)}`,
+        );
+      }
+    } else {
+      this.deps.log.debug(
+        `[lcm] afterTurn: transcript file unavailable for ${sessionLabel}; ingesting runtime snapshot only`,
       );
     }
     const transcriptReconcileUnsafeToAdvance =
@@ -7017,7 +7122,7 @@ export class LcmContextEngine implements ContextEngine {
           action: "skip",
           sessionId: params.sessionId,
           sessionKey: params.sessionKey,
-          sessionFile: params.sessionFile,
+          sessionFile,
           thresholdBytes: this.config.autoRotateSessionFiles.sizeBytes,
           durationMs: 0,
           reason: "ingest-failed",
@@ -7043,10 +7148,12 @@ export class LcmContextEngine implements ContextEngine {
               sessionKey: params.sessionKey,
             });
             try {
-              await this.refreshBootstrapState({
-                conversationId: conversation.conversationId,
-                sessionFile: params.sessionFile,
-              });
+              if (sessionFile) {
+                await this.refreshBootstrapState({
+                  conversationId: conversation.conversationId,
+                  sessionFile,
+                });
+              }
             } catch (err) {
               this.deps.log.warn(
                 `[lcm] afterTurn: heartbeat pruning checkpoint refresh failed for ${sessionContext}: ${describeLogError(err)}`,
@@ -7108,10 +7215,13 @@ export class LcmContextEngine implements ContextEngine {
       return;
     }
     const refreshAfterTurnBootstrapState = async (): Promise<void> => {
+      if (!sessionFile) {
+        return;
+      }
       try {
         await this.refreshBootstrapState({
           conversationId: conversation.conversationId,
-          sessionFile: params.sessionFile,
+          sessionFile,
         });
       } catch (err) {
         this.deps.log.warn(
@@ -7167,10 +7277,11 @@ export class LcmContextEngine implements ContextEngine {
           const compactResult = await this.compact({
             sessionId: params.sessionId,
             sessionKey: params.sessionKey,
-            sessionFile: params.sessionFile,
+            sessionFile,
             tokenBudget,
             currentTokenCount: observedCurrentTokenCount,
             compactionTarget: "threshold",
+            runtimeContext: params.runtimeContext,
             legacyParams,
           });
           if (!compactResult.ok) {
@@ -7462,13 +7573,14 @@ export class LcmContextEngine implements ContextEngine {
   async compact(params: {
     sessionId: string;
     sessionKey?: string;
-    sessionFile: string;
+    sessionFile?: string;
+    transcriptScope?: ContextEngineTranscriptScope;
     tokenBudget?: number;
     currentTokenCount?: number;
     compactionTarget?: "budget" | "threshold";
     customInstructions?: string;
     /** OpenClaw runtime param name (preferred). */
-    runtimeContext?: Record<string, unknown>;
+    runtimeContext?: ContextEngineRuntimeContext | Record<string, unknown>;
     /** Back-compat param name. */
     legacyParams?: Record<string, unknown>;
     /** Force compaction even if below threshold */
