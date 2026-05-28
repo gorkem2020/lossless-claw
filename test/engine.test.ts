@@ -2,8 +2,6 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ContextAssembler } from "../src/assembler.js";
 import type { LcmConfig } from "../src/db/config.js";
@@ -18,6 +16,8 @@ import {
 } from "../src/expansion-auth.js";
 import { RetrievalEngine } from "../src/retrieval.js";
 import type { LcmDependencies } from "../src/types.js";
+import type { AgentMessage } from "../src/openclaw-bridge.js";
+import { SessionManager } from "./session-manager-fixture.js";
 
 const tempDirs: string[] = [];
 

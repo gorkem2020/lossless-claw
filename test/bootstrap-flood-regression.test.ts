@@ -2,13 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LcmConfig } from "../src/db/config.js";
 import { closeLcmConnection, createLcmDatabaseConnection } from "../src/db/connection.js";
 import { LcmContextEngine } from "../src/engine.js";
+import type { AgentMessage } from "../src/openclaw-bridge.js";
 import type { LcmDependencies } from "../src/types.js";
+import { SessionManager } from "./session-manager-fixture.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

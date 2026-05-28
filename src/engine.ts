@@ -5,7 +5,6 @@ import type { FileHandle } from "node:fs/promises";
 import { join, resolve as resolvePath } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { createInterface } from "node:readline";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type {
   ContextEngine,
   ContextEngineInfo,
@@ -49,6 +48,7 @@ import {
 import { describeLogError } from "./lcm-log.js";
 import { describeLcmConfigSource } from "./db/config.js";
 import { RetrievalEngine } from "./retrieval.js";
+import { loadSessionJsonlSync } from "./session-jsonl.js";
 import { compileSessionPatterns, matchesSessionPattern } from "./session-patterns.js";
 import { logStartupBannerOnce } from "./startup-banner-log.js";
 import {
@@ -498,24 +498,25 @@ function extractTranscriptToolCallId(message: AgentMessage): string | undefined 
 }
 
 function listTranscriptToolResultEntryIdsByCallId(sessionFile: string): Map<string, string> {
-  const sessionManager = SessionManager.open(sessionFile);
-  const branch = sessionManager.getBranch();
+  const branch = loadSessionJsonlSync(sessionFile).branch;
   const entryIdsByCallId = new Map<string, string>();
   const duplicateCallIds = new Set<string>();
 
   for (const entry of branch) {
-    if (entry.type !== "message" || entry.message.role !== "toolResult") {
+    const message = asRecord(entry.message);
+    if (entry.type !== "message" || message?.role !== "toolResult") {
       continue;
     }
-    const toolCallId = extractTranscriptToolCallId(entry.message as AgentMessage);
+    const toolCallId = extractTranscriptToolCallId(message as AgentMessage);
     if (!toolCallId) {
       continue;
     }
-    if (entryIdsByCallId.has(toolCallId)) {
+    const entryId = typeof entry.id === "string" ? entry.id : undefined;
+    if (!entryId || entryIdsByCallId.has(toolCallId)) {
       duplicateCallIds.add(toolCallId);
       continue;
     }
-    entryIdsByCallId.set(toolCallId, entry.id);
+    entryIdsByCallId.set(toolCallId, entryId);
   }
 
   for (const duplicateCallId of duplicateCallIds) {
@@ -8500,9 +8501,12 @@ export class LcmContextEngine implements ContextEngine {
     conversationId: number;
     sessionFile: string;
   }): Promise<RotateTranscriptRewriteResult> {
-    const sessionManager = SessionManager.open(params.sessionFile);
-    const header = sessionManager.getHeader();
-    const branch = sessionManager.getBranch();
+    const sessionJsonl = loadSessionJsonlSync(params.sessionFile);
+    const header = sessionJsonl.header;
+    const branch = sessionJsonl.branch;
+    if (!header) {
+      throw new Error("Session transcript is missing a valid header.");
+    }
     const originalStats = await stat(params.sessionFile);
 
     const messageIndices: number[] = [];
@@ -8550,7 +8554,7 @@ export class LcmContextEngine implements ContextEngine {
 
     let previousEntryId: string | null = null;
     const linearizedEntries = entriesToKeep.map((entry) => {
-      const nextEntry = {
+      const nextEntry: Record<string, unknown> & { parentId: string | null } = {
         ...entry,
         parentId: previousEntryId,
       };

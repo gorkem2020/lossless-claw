@@ -9,4 +9,10 @@ describe("package OpenClaw compatibility metadata", () => {
     expect(packageJson.openclaw.compat.tested).toEqual(["2026.5.22"]);
     expect(packageJson.openclaw.build.openclawVersion).toBe("2026.5.22");
   });
+
+  it("does not ship legacy Pi runtime packages", () => {
+    expect(packageJson.dependencies).not.toHaveProperty("@earendil-works/pi-agent-core");
+    expect(packageJson.dependencies).not.toHaveProperty("@earendil-works/pi-ai");
+    expect(packageJson.dependencies).not.toHaveProperty("@earendil-works/pi-coding-agent");
+  });
 });
