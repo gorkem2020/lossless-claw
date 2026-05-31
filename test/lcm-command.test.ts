@@ -1513,6 +1513,221 @@ describe("lcm command", () => {
     expect(summarize).not.toHaveBeenCalled();
   });
 
+  it("blocks doctor apply for large scoped repairs before summarizer or writes run", async () => {
+    const summarize = vi.fn(async () => "should not run");
+    const fixture = createCommandFixture({ summarize: summarize as LcmSummarizeFn });
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const currentConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-apply-large-targets",
+      sessionKey: "agent:main:telegram:direct:doctor-apply-large-targets",
+    });
+
+    for (let index = 0; index < 26; index += 1) {
+      await fixture.summaryStore.insertSummary({
+        summaryId: `sum_large_target_${index}`,
+        conversationId: currentConversation.conversationId,
+        kind: "leaf",
+        depth: 0,
+        content: `broken leaf ${index}\n${"[Truncated from 512 tokens]"}`,
+        tokenCount: 11,
+      });
+    }
+
+    const result = await fixture.command.handler(
+      createCommandContext("doctor apply", {
+        sessionKey: "agent:main:telegram:direct:doctor-apply-large-targets",
+      }),
+    );
+
+    const unchanged = await fixture.summaryStore.getSummary("sum_large_target_0");
+    expect(result.text).toContain("🩺 Lossless Claw Doctor Apply");
+    expect(result.text).toContain("**🧯 Safety preflight**");
+    expect(result.text).toContain("status: blocked");
+    expect(result.text).toContain("mode: read-only; no summary rewrites ran");
+    expect(result.text).toContain("detected summaries: 26");
+    expect(result.text).toContain("doctor target count 26 exceeds safe inline limit 25");
+    expect(result.text).toContain("`/lossless doctor apply confirm-offline`");
+    expect(summarize).not.toHaveBeenCalled();
+    expect(unchanged?.content).toContain("[Truncated from 512 tokens]");
+  });
+
+  it("blocks doctor apply when compaction maintenance is pending for the active conversation", async () => {
+    const summarize = vi.fn(async () => "should not run");
+    const fixture = createCommandFixture({ summarize: summarize as LcmSummarizeFn });
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const currentConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-apply-pending-maintenance",
+      sessionKey: "agent:main:telegram:direct:doctor-apply-pending-maintenance",
+    });
+    const [message] = await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: currentConversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: "pending maintenance source",
+        tokenCount: 7,
+      },
+    ]);
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_pending_maintenance",
+      conversationId: currentConversation.conversationId,
+      kind: "leaf",
+      depth: 0,
+      content: `broken leaf\n${"[Truncated from 512 tokens]"}`,
+      tokenCount: 11,
+      sourceMessageTokenCount: 7,
+    });
+    await fixture.summaryStore.linkSummaryToMessages("sum_pending_maintenance", [message.messageId]);
+    fixture.db
+      .prepare(
+        `INSERT INTO conversation_compaction_maintenance (
+           conversation_id,
+           pending,
+           requested_at,
+           reason,
+           running,
+           token_budget,
+           current_token_count,
+           projected_token_count,
+           updated_at
+         ) VALUES (?, 1, ?, ?, 0, ?, ?, ?, datetime('now'))`,
+      )
+      .run(
+        currentConversation.conversationId,
+        "2026-04-12T00:00:00.000Z",
+        "budget-trigger",
+        128_000,
+        96_001,
+        96_001,
+      );
+
+    const result = await fixture.command.handler(
+      createCommandContext("doctor apply", {
+        sessionKey: "agent:main:telegram:direct:doctor-apply-pending-maintenance",
+      }),
+    );
+
+    const unchanged = await fixture.summaryStore.getSummary("sum_pending_maintenance");
+    expect(result.text).toContain("status: blocked");
+    expect(result.text).toContain("compaction maintenance is pending (budget-trigger)");
+    expect(result.text).toContain("observed token count 96,001 exceeds 75% of repair budget 128,000");
+    expect(summarize).not.toHaveBeenCalled();
+    expect(unchanged?.content).toContain("[Truncated from 512 tokens]");
+  });
+
+  it("blocks doctor apply when a broken leaf summary points at oversized raw source tokens", async () => {
+    const summarize = vi.fn(async () => "should not run");
+    const fixture = createCommandFixture({ summarize: summarize as LcmSummarizeFn });
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const currentConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-apply-raw-source-tokens",
+      sessionKey: "agent:main:telegram:direct:doctor-apply-raw-source-tokens",
+    });
+    const [message] = await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: currentConversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: "oversized raw repair source",
+        tokenCount: 120_000,
+      },
+    ]);
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_raw_source_tokens",
+      conversationId: currentConversation.conversationId,
+      kind: "leaf",
+      depth: 0,
+      content: `broken leaf\n${"[Truncated from 512 tokens]"}`,
+      tokenCount: 11,
+      sourceMessageTokenCount: 120_000,
+    });
+    await fixture.summaryStore.linkSummaryToMessages("sum_raw_source_tokens", [message.messageId]);
+
+    const result = await fixture.command.handler(
+      createCommandContext("doctor apply", {
+        sessionKey: "agent:main:telegram:direct:doctor-apply-raw-source-tokens",
+      }),
+    );
+
+    const unchanged = await fixture.summaryStore.getSummary("sum_raw_source_tokens");
+    expect(result.text).toContain("status: blocked");
+    expect(result.text).toContain("detected summaries: 1");
+    expect(result.text).toContain("observed token count 120,000 exceeds 75% of repair budget 128,000");
+    expect(summarize).not.toHaveBeenCalled();
+    expect(unchanged?.content).toContain("[Truncated from 512 tokens]");
+  });
+
+  it("allows an explicit offline confirmation to run doctor apply despite pending maintenance", async () => {
+    const summarize = vi.fn(async () => "OFFLINE REPAIR");
+    const fixture = createCommandFixture({ summarize: summarize as LcmSummarizeFn });
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const currentConversation = await fixture.conversationStore.createConversation({
+      sessionId: "doctor-apply-confirm-offline",
+      sessionKey: "agent:main:telegram:direct:doctor-apply-confirm-offline",
+    });
+    const [message] = await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: currentConversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: "offline repair source",
+        tokenCount: 7,
+      },
+    ]);
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_confirm_offline",
+      conversationId: currentConversation.conversationId,
+      kind: "leaf",
+      depth: 0,
+      content: `broken leaf\n${"[Truncated from 512 tokens]"}`,
+      tokenCount: 11,
+      sourceMessageTokenCount: 7,
+    });
+    await fixture.summaryStore.linkSummaryToMessages("sum_confirm_offline", [message.messageId]);
+    fixture.db
+      .prepare(
+        `INSERT INTO conversation_compaction_maintenance (
+           conversation_id,
+           pending,
+           requested_at,
+           reason,
+           running,
+           token_budget,
+           current_token_count,
+           updated_at
+         ) VALUES (?, 1, ?, ?, 0, ?, ?, datetime('now'))`,
+      )
+      .run(
+        currentConversation.conversationId,
+        "2026-04-12T00:00:00.000Z",
+        "budget-trigger",
+        128_000,
+        96_001,
+      );
+
+    const result = await fixture.command.handler(
+      createCommandContext("doctor apply confirm-offline", {
+        sessionKey: "agent:main:telegram:direct:doctor-apply-confirm-offline",
+      }),
+    );
+
+    const repaired = await fixture.summaryStore.getSummary("sum_confirm_offline");
+    expect(result.text).toContain("safety override: confirm-offline");
+    expect(result.text).toContain("repaired summaries: 1");
+    expect(result.text).not.toContain("status: blocked");
+    expect(summarize).toHaveBeenCalledTimes(1);
+    expect(repaired?.content).toContain("OFFLINE REPAIR");
+    expect(repaired?.content).not.toContain("[Truncated from 512 tokens]");
+  });
+
   it("repairs scoped doctor summaries in place and feeds repaired children into parents", async () => {
     const summarize = vi.fn(async (text: string, _aggressive?: boolean, options?: Parameters<LcmSummarizeFn>[2]) => {
       if (options?.isCondensed) {
@@ -2352,6 +2567,11 @@ describe("lcm command helpers", () => {
     expect(__testing.parseLcmCommand("focus")).toEqual({ kind: "focus_status" });
     expect(__testing.parseLcmCommand("refocus")).toEqual({ kind: "refocus" });
     expect(__testing.parseLcmCommand("unfocus")).toEqual({ kind: "unfocus" });
+    expect(__testing.parseLcmCommand("doctor apply confirm-offline")).toEqual({
+      kind: "doctor",
+      apply: true,
+      applyOptions: { confirmOffline: true },
+    });
   });
 
   it("treats only the canonical engine id and empty slot state as selected", () => {

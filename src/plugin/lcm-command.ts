@@ -37,6 +37,9 @@ import { FocusBriefStore, hashFocusSourceContext } from "../store/focus-brief-st
 const VISIBLE_COMMAND = "/lossless";
 const HIDDEN_ALIAS = "/lcm";
 const ROTATE_DATABASE_LOCK_TIMEOUT_MS = 30_000;
+const DOCTOR_APPLY_LARGE_MESSAGE_THRESHOLD = 1_000;
+const DOCTOR_APPLY_LARGE_TARGET_THRESHOLD = 25;
+const DOCTOR_APPLY_BUDGET_PRESSURE_RATIO = 0.75;
 
 type LcmStatusStats = {
   conversationCount: number;
@@ -71,6 +74,9 @@ type CurrentConversationResolution =
       kind: "unavailable";
       reason: string;
     };
+type DoctorApplyOptions = {
+  confirmOffline: boolean;
+};
 
 type ParsedLcmCommand =
   | { kind: "status" }
@@ -80,7 +86,7 @@ type ParsedLcmCommand =
   | { kind: "focus_generate"; prompt: string }
   | { kind: "refocus" }
   | { kind: "unfocus" }
-  | { kind: "doctor"; apply: boolean }
+  | { kind: "doctor"; apply: boolean; applyOptions?: DoctorApplyOptions }
   | { kind: "doctor_cleaners"; apply: boolean; filterId?: DoctorCleanerId; vacuum: boolean }
   | { kind: "help"; error?: string };
 
@@ -229,6 +235,37 @@ function parseDoctorCleanerApplyArgs(tokens: string[]):
   return { ok: true, filterId, vacuum };
 }
 
+function parseDoctorApplyArgs(tokens: string[]):
+  | { ok: true; options: DoctorApplyOptions }
+  | { ok: false; error: string } {
+  if (tokens.length === 0) {
+    return { ok: true, options: { confirmOffline: false } };
+  }
+
+  let confirmOffline = false;
+  for (const token of tokens) {
+    const normalized = token.toLowerCase();
+    if (
+      normalized === "confirm-offline" ||
+      normalized === "confirm-large" ||
+      normalized === "offline" ||
+      normalized === "--offline" ||
+      normalized === "--confirm-large"
+    ) {
+      confirmOffline = true;
+      continue;
+    }
+
+    return {
+      ok: false,
+      error:
+        `\`${VISIBLE_COMMAND} doctor apply\` accepts optional \`confirm-offline\` for large/hot repair overrides.`,
+    };
+  }
+
+  return { ok: true, options: { confirmOffline } };
+}
+
 function parseLcmCommand(rawArgs: string | undefined): ParsedLcmCommand {
   const raw = (rawArgs ?? "").trim();
   if (raw === "") {
@@ -283,13 +320,16 @@ function parseLcmCommand(rawArgs: string | undefined): ParsedLcmCommand {
             }
           : { kind: "help", error: parsedApply.error };
       }
-      if (rest.length === 1 && rest[0]?.toLowerCase() === "apply") {
-        return { kind: "doctor", apply: true };
+      if (rest[0]?.toLowerCase() === "apply") {
+        const parsedApply = parseDoctorApplyArgs(rest.slice(1));
+        return parsedApply.ok
+          ? { kind: "doctor", apply: true, applyOptions: parsedApply.options }
+          : { kind: "help", error: parsedApply.error };
       }
       return {
         kind: "help",
         error:
-          `\`${VISIBLE_COMMAND} doctor\` accepts no arguments, \`clean\` for global high-confidence junk diagnostics, \`clean apply [filter-id] [vacuum]\` for cleanup, or \`apply\` for the scoped summary repair path.`,
+          `\`${VISIBLE_COMMAND} doctor\` accepts no arguments, \`clean\` for global high-confidence junk diagnostics, \`clean apply [filter-id] [vacuum]\` for cleanup, or \`apply [confirm-offline]\` for the scoped summary repair path.`,
       };
     case "help":
       return { kind: "help" };
@@ -560,6 +600,58 @@ function resolveLifecycleCompactionTokenBudget(config: LcmConfig): number {
     : 128_000;
 }
 
+function buildDoctorApplySafetyPreflight(params: {
+  config: LcmConfig;
+  stats: LcmConversationStatusStats;
+  doctor: DoctorSummaryStats;
+  maintenance: ConversationCompactionMaintenanceRecord | null;
+}): { blocked: boolean; reasons: string[]; tokenBudget: number; tokenThreshold: number } {
+  const tokenBudget = resolveLifecycleCompactionTokenBudget(params.config);
+  const tokenThreshold = Math.floor(tokenBudget * DOCTOR_APPLY_BUDGET_PRESSURE_RATIO);
+  const reasons: string[] = [];
+  const maintenanceObservedTokens = Math.max(
+    params.maintenance?.currentTokenCount ?? 0,
+    params.maintenance?.projectedTokenCount ?? 0,
+  );
+  const observedTokens = Math.max(
+    params.stats.contextTokenCount,
+    params.stats.summarizedSourceTokens,
+    params.stats.compressedTokenCount,
+    maintenanceObservedTokens,
+  );
+
+  if (params.doctor.total > DOCTOR_APPLY_LARGE_TARGET_THRESHOLD) {
+    reasons.push(
+      `doctor target count ${formatNumber(params.doctor.total)} exceeds safe inline limit ${formatNumber(DOCTOR_APPLY_LARGE_TARGET_THRESHOLD)}`,
+    );
+  }
+  if (params.stats.messageCount > DOCTOR_APPLY_LARGE_MESSAGE_THRESHOLD) {
+    reasons.push(
+      `message count ${formatNumber(params.stats.messageCount)} exceeds safe inline limit ${formatNumber(DOCTOR_APPLY_LARGE_MESSAGE_THRESHOLD)}`,
+    );
+  }
+  if (observedTokens > tokenThreshold) {
+    reasons.push(
+      `observed token count ${formatNumber(observedTokens)} exceeds ${formatNumber(Math.round(DOCTOR_APPLY_BUDGET_PRESSURE_RATIO * 100))}% of repair budget ${formatNumber(tokenBudget)}`,
+    );
+  }
+  if (params.maintenance?.pending) {
+    reasons.push(
+      `compaction maintenance is pending (${params.maintenance.reason ?? "reason unknown"})`,
+    );
+  }
+  if (params.maintenance?.running) {
+    reasons.push("compaction maintenance is already running");
+  }
+
+  return {
+    blocked: reasons.length > 0,
+    reasons,
+    tokenBudget,
+    tokenThreshold,
+  };
+}
+
 // Run the cache-aware focus lifecycle sweep. Focus and unfocus both mutate the
 // prompt prefix, so they explicitly take the manual full-sweep path and bypass
 // threshold skips instead of leaving compaction to normal background policy.
@@ -722,6 +814,10 @@ function buildHelpText(error?: string): string {
         "Delete approved high-confidence cleaner matches after creating a DB backup.",
       ),
       buildStatLine(formatCommand(`${VISIBLE_COMMAND} doctor apply`), "Repair broken summaries in the current conversation."),
+      buildStatLine(
+        formatCommand(`${VISIBLE_COMMAND} doctor apply confirm-offline`),
+        "Override large/hot-session repair preflight after isolating the active channel path.",
+      ),
     ]),
     "",
     buildSection("🧭 Notes", [
@@ -2104,6 +2200,7 @@ async function buildDoctorApplyText(params: {
   config: LcmConfig;
   deps?: LcmDependencies;
   summarize?: LcmSummarizeFn;
+  options?: DoctorApplyOptions;
 }): Promise<string> {
   const current = await resolveCurrentConversation(params);
 
@@ -2122,6 +2219,46 @@ async function buildDoctorApplyText(params: {
   }
 
   const stats = getDoctorSummaryStats(params.db, current.stats.conversationId);
+  const maintenance = await getConversationCompactionMaintenanceByConversationId(
+    params.db,
+    current.stats.conversationId,
+  );
+  const preflight = buildDoctorApplySafetyPreflight({
+    config: params.config,
+    stats: current.stats,
+    doctor: stats,
+    maintenance,
+  });
+  if (preflight.blocked && params.options?.confirmOffline !== true) {
+    return [
+      ...buildHeaderLines(),
+      "",
+      "🩺 Lossless Claw Doctor Apply",
+      "",
+      buildSection("📍 Current conversation", [
+        buildStatLine("conversation id", formatNumber(current.stats.conversationId)),
+        buildStatLine(
+          "session key",
+          current.stats.sessionKey ? formatCommand(truncateMiddle(current.stats.sessionKey, 44)) : "missing",
+        ),
+        buildStatLine("scope", "this conversation only"),
+      ]),
+      "",
+      buildSection("🧯 Safety preflight", [
+        buildStatLine("status", "blocked"),
+        buildStatLine("mode", "read-only; no summary rewrites ran"),
+        buildStatLine("messages", formatNumber(current.stats.messageCount)),
+        buildStatLine("tokens in context", formatNumber(current.stats.contextTokenCount)),
+        buildStatLine("detected summaries", formatNumber(stats.total)),
+        buildStatLine("token threshold", formatNumber(preflight.tokenThreshold)),
+        ...preflight.reasons.map((reason) => buildStatLine("reason", reason)),
+      ]),
+      "",
+      buildSection("🛠️ Next step", [
+        `Run ${formatCommand(`${VISIBLE_COMMAND} doctor apply confirm-offline`)} only from an isolated/offline maintenance lane after active channel delivery is paused or moved away from this conversation.`,
+      ]),
+    ].join("\n");
+  }
   let result: Awaited<ReturnType<typeof applyScopedDoctorRepair>>;
   try {
     result = await applyScopedDoctorRepair({
@@ -2187,6 +2324,9 @@ async function buildDoctorApplyText(params: {
   lines.push(
     buildSection("🛠️ Apply", [
       buildStatLine("mode", "in-place summary rewrite"),
+      ...(params.options?.confirmOffline === true
+        ? [buildStatLine("safety override", "confirm-offline")]
+        : []),
       buildStatLine("detected summaries", formatNumber(stats.total)),
       buildStatLine("old-marker summaries", formatNumber(stats.old)),
       buildStatLine("truncated-marker summaries", formatNumber(stats.truncated)),
@@ -2310,6 +2450,7 @@ export function createLcmCommand(params: {
                   config: params.config,
                   deps: params.deps,
                   summarize: params.summarize,
+                  options: parsed.applyOptions,
                 }),
               }
             : { text: await buildDoctorText({ ctx, db: await getDb() }) };
