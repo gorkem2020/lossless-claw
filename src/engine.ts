@@ -6419,7 +6419,7 @@ export class LcmContextEngine implements ContextEngine {
         phase: "afterTurn",
         sessionId: params.sessionId,
         sessionKey: params.sessionKey,
-        createReplacement: true,
+        createReplacement: false,
       });
       await this.rotateStaleSessionKeyConversationIfTrackedTranscriptMissing({
         phase: "afterTurn",
