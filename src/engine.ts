@@ -4447,7 +4447,7 @@ export class LcmContextEngine implements ContextEngine {
     currentTokenCount?: number;
     runtimeContext?: ContextEngineMaintenanceRuntimeContext;
     legacyParams?: Record<string, unknown>;
-  }): Promise<ContextEngineMaintenanceResult | null> {
+  }): Promise<(ContextEngineMaintenanceResult & { exhausted?: boolean }) | null> {
     const maintenance = await this.compactionMaintenanceStore.getConversationCompactionMaintenance(
       params.conversationId,
     );
@@ -4543,10 +4543,19 @@ export class LcmContextEngine implements ContextEngine {
         legacyParams: params.legacyParams,
       });
       const blockedByAuthCircuitBreaker = result.reason === "circuit breaker open";
-      const keepPending = !result.ok || blockedByAuthCircuitBreaker;
+      // #639 Mode 2: terminal compaction exhaustion (no eligible candidates while
+      // over target) is non-retryable — clear the debt instead of pinning it and
+      // climbing retry_attempts forever (which thrashes the assemble degraded
+      // fallback). executeCompactionCore still returns ok=false here, so overflow
+      // recovery keeps the honest signal; only the deferred-debt maintenance
+      // treats it as done.
+      const compactionExhausted =
+        (result as { exhausted?: boolean }).exhausted === true;
+      const keepPending =
+        (!result.ok || blockedByAuthCircuitBreaker) && !compactionExhausted;
       const failureSummary = blockedByAuthCircuitBreaker
         ? "summary provider circuit breaker is open"
-        : result.ok
+        : result.ok || compactionExhausted
           ? null
           : result.reason ?? "deferred compaction failed";
       const summarySpendBackoffUntil = keepPending
@@ -4567,6 +4576,7 @@ export class LcmContextEngine implements ContextEngine {
         bytesFreed: 0,
         rewrittenEntries: 0,
         ...(result.reason ? { reason: result.reason } : {}),
+        ...(compactionExhausted ? { exhausted: true } : {}),
       };
     } catch (error) {
       await this.compactionMaintenanceStore.markProactiveCompactionFinished({
@@ -4601,11 +4611,12 @@ export class LcmContextEngine implements ContextEngine {
     sessionKey?: string;
     tokenBudget: number;
     currentTokenCount?: number;
-  }): Promise<void> {
+  }): Promise<{ exhausted: boolean }> {
     const sessionLabel = [
       `session=${params.sessionId}`,
       ...(params.sessionKey?.trim() ? [`sessionKey=${params.sessionKey.trim()}`] : []),
     ].join(" ");
+    let drainResult = { exhausted: false };
     await this.withSessionQueue(
       this.resolveSessionQueueKey(params.sessionId, params.sessionKey),
       async () => {
@@ -4632,7 +4643,7 @@ export class LcmContextEngine implements ContextEngine {
                 ...(telemetry.model ? { model: telemetry.model } : {}),
               }
             : undefined;
-        await this.consumeDeferredCompactionDebt({
+        const result = await this.consumeDeferredCompactionDebt({
           conversationId: params.conversationId,
           sessionId: params.sessionId,
           sessionKey: params.sessionKey,
@@ -4640,12 +4651,14 @@ export class LcmContextEngine implements ContextEngine {
           currentTokenCount: normalizedCurrentTokenCount,
           legacyParams: deferredLegacyParams,
         });
+        drainResult = { exhausted: result?.exhausted === true };
       },
       {
         operationName: "assembleDeferredCompaction",
         context: sessionLabel,
       },
     );
+    return drainResult;
   }
 
   /** Run the actual compaction body without taking the per-session queue. */
@@ -4844,6 +4857,22 @@ export class LcmContextEngine implements ContextEngine {
             : !liveContextStillExceedsTarget;
       const thresholdSweepStillOverTarget =
         isThresholdSweep && sweepResult.actionTaken && !isUnderTargetAfterSweep;
+      const thresholdSweepStoppedAtBudget =
+        (sweepResult as { stoppedAtBudget?: boolean }).stoppedAtBudget === true;
+      // #639 Mode 2 (deferred-compaction wedge): a threshold sweep that took NO
+      // action and did NOT fail (no eligible leaf/condensed candidates remain)
+      // while still over target is TERMINAL EXHAUSTION. Compaction shrinks STORED
+      // leaves but cannot reduce the host's OBSERVED live tokens, so retrying the
+      // same sweep can never make progress. We keep ok=false below (so overflow
+      // recovery / #15 still see the honest still-over-target failure) but flag
+      // it so the deferred-debt drain treats it as non-retryable and clears the
+      // debt instead of pinning maintenance.pending + climbing retry_attempts.
+      const thresholdSweepExhaustedOverTarget =
+        isThresholdSweep &&
+        !sweepResult.actionTaken &&
+        !sweepResult.authFailure &&
+        !thresholdSweepStoppedAtBudget &&
+        !isUnderTargetAfterSweep;
       const sweepOk =
         !sweepResult.authFailure &&
         (isUnderTargetAfterSweep || (sweepResult.actionTaken && !isThresholdSweep));
@@ -4874,6 +4903,7 @@ export class LcmContextEngine implements ContextEngine {
         ok: sweepOk,
         compacted: sweepResult.actionTaken,
         reason: sweepReason,
+        ...(thresholdSweepExhaustedOverTarget ? { exhausted: true } : {}),
         result: {
           tokensBefore: decision.currentTokens,
           tokensAfter: sweepResult.tokensAfter,
@@ -9478,7 +9508,10 @@ export class LcmContextEngine implements ContextEngine {
       );
       let deferredAssemblyDegradation:
         | {
-            reason: "near-budget" | "emergency-debt-still-pending";
+            reason:
+              | "near-budget"
+              | "emergency-debt-still-pending"
+              | "emergency-debt-exhausted";
             pressure: ReturnType<typeof resolveDeferredAssemblyPressure>;
           }
         | null = null;
@@ -9494,8 +9527,9 @@ export class LcmContextEngine implements ContextEngine {
           this.deps.log.warn(
             `[lcm] assemble: emergency deferred compaction debt draining pre-assembly conversation=${conversation.conversationId} ${sessionLabel} currentTokenCount=${pressure.observedContextTokens} projectedTokenCount=${pressure.projectedTokenCount ?? "null"} tokenBudget=${tokenBudget} reason=over-budget`,
           );
+          let emergencyDrainResult: { exhausted: boolean } | null = null;
           try {
-            await this.maybeConsumeDeferredCompactionDebtForAssemble({
+            emergencyDrainResult = await this.maybeConsumeDeferredCompactionDebtForAssemble({
               conversationId: conversation.conversationId,
               sessionId: params.sessionId,
               sessionKey: params.sessionKey,
@@ -9522,6 +9556,14 @@ export class LcmContextEngine implements ContextEngine {
                 pressure,
               };
             }
+          } else if (
+            emergencyDrainResult?.exhausted === true &&
+            pressure.pressureTokenCount > pressureThreshold
+          ) {
+            deferredAssemblyDegradation = {
+              reason: "emergency-debt-exhausted",
+              pressure,
+            };
           }
         } else if (pressure.pressureTokenCount > pressureThreshold) {
           deferredAssemblyDegradation = {

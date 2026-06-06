@@ -14138,6 +14138,53 @@ describe("LcmContextEngine fidelity and token budget", () => {
     }
   });
 
+  it("maintain() keeps threshold debt pending when a no-action sweep stops at budget", async () => {
+    const engine = createEngine();
+    const sessionId = "maintain-deferred-no-action-budget-stop";
+    const conversation = await engine.getConversationStore().getOrCreateConversation(sessionId, {
+      sessionKey: undefined,
+    });
+    await engine.getCompactionMaintenanceStore().requestProactiveCompactionDebt({
+      conversationId: conversation.conversationId,
+      reason: "threshold",
+      tokenBudget: 4_096,
+      currentTokenCount: 3_500,
+    });
+    const privateEngine = engine as unknown as {
+      compaction: {
+        compactFullSweep: (input: unknown) => Promise<unknown>;
+      };
+    };
+    vi.spyOn(privateEngine.compaction, "compactFullSweep").mockResolvedValue({
+      actionTaken: false,
+      tokensBefore: 3_500,
+      tokensAfter: 3_500,
+      condensed: false,
+      stoppedAtBudget: true,
+    });
+
+    const result = await engine.maintain({
+      sessionId,
+      sessionFile: createSessionFilePath("maintain-deferred-no-action-budget-stop"),
+      runtimeContext: {
+        allowDeferredCompactionExecution: true,
+        tokenBudget: 4_096,
+        currentTokenCount: 3_500,
+      },
+    });
+
+    const maintenance = await engine
+      .getCompactionMaintenanceStore()
+      .getConversationCompactionMaintenance(conversation.conversationId);
+    expect(maintenance?.pending).toBe(true);
+    expect(maintenance?.running).toBe(false);
+    expect(maintenance?.lastFailureSummary).toBe("live context still exceeds target");
+    expect(maintenance?.retryAttempts).toBe(1);
+    expect(maintenance?.nextAttemptAfter).toBeInstanceOf(Date);
+    expect(result.changed).toBe(false);
+    expect(result.reason).toBe("live context still exceeds target");
+  });
+
   it("maintain() keeps threshold debt pending when partial compaction remains over target", async () => {
     const engine = createEngine();
     const sessionId = "maintain-deferred-partial-still-over-threshold";
@@ -14811,7 +14858,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining("reason=near-budget"));
   });
 
-  it("assemble() preserves leading system context when degraded live context is bounded", async () => {
+  it("assemble() clears exhausted threshold debt and preserves leading system context via degraded fallback (#639 Mode 2)", async () => {
     const log = {
       info: vi.fn(),
       warn: vi.fn(),
@@ -14839,12 +14886,67 @@ describe("LcmContextEngine fidelity and token budget", () => {
       tokenBudget: 10,
     });
 
+    // #639 Mode 2: exhausted threshold debt (empty conversation -> nothing to
+    // compact) is now CLEARED rather than left pending. Because this drain
+    // happens during an already-over-budget assemble call, the current turn still
+    // uses the degraded fallback instead of returning raw live messages.
     expect(assembleResult.messages.map((message) => message.content)).toEqual([
       "critical runtime policy",
       "current delivery turn",
     ]);
+    const maintenance = await engine
+      .getCompactionMaintenanceStore()
+      .getConversationCompactionMaintenance(conversation.conversationId);
+    expect(maintenance?.pending).toBe(false);
     expect(log.warn).toHaveBeenCalledWith(
       expect.stringContaining("[lcm] assemble: degraded live fallback"),
+    );
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringContaining("reason=emergency-debt-exhausted"),
+    );
+  });
+
+  it("assemble() bounds live context when emergency debt drain reaches exhaustion", async () => {
+    const log = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    const engine = createEngineWithDepsOverrides({ log });
+    const sessionId = "assemble-exhausted-emergency-debt-bounds-live";
+    const conversation = await engine.getConversationStore().getOrCreateConversation(sessionId, {
+      sessionKey: undefined,
+    });
+    await engine.getCompactionMaintenanceStore().requestProactiveCompactionDebt({
+      conversationId: conversation.conversationId,
+      reason: "threshold",
+      tokenBudget: 30,
+      currentTokenCount: 500,
+    });
+
+    const assembleResult = await engine.assemble({
+      sessionId,
+      messages: [
+        makeMessage({ role: "user", content: "oversized historical live turn ".repeat(100) }),
+        makeMessage({ role: "user", content: "current delivery turn" }),
+      ],
+      tokenBudget: 10,
+    });
+
+    const maintenance = await engine
+      .getCompactionMaintenanceStore()
+      .getConversationCompactionMaintenance(conversation.conversationId);
+    expect(maintenance?.pending).toBe(false);
+    expect(assembleResult.messages.map((message) => message.content)).toEqual([
+      "current delivery turn",
+    ]);
+    expect(assembleResult.estimatedTokens).toBeLessThanOrEqual(10);
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringContaining("[lcm] assemble: degraded live fallback"),
+    );
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringContaining("reason=emergency-debt-exhausted"),
     );
   });
 
@@ -17788,4 +17890,52 @@ describe("LcmContextEngine.assemble maxAssemblyTokenBudget cap", () => {
     ).toBe(false);
   });
 
+});
+
+// ── #639 Mode 2 — deferred-compaction wedge regression ────────────────────────
+describe("#639 Mode 2 deferred-compaction wedge (live context exceeds target, no candidates)", () => {
+  it("over-target threshold debt with no compactable candidates is exhaustion: debt clears, no retry thrash", async () => {
+    const engine = createEngine();
+    const sessionId = "wedge-639-mode2-exhaustion";
+    const conversation = await engine
+      .getConversationStore()
+      .getOrCreateConversation(sessionId, { sessionKey: undefined });
+
+    // Seed threshold debt where the live/observed context (8000) far exceeds the
+    // target derived from tokenBudget (4096), but there is NOTHING compactable
+    // (empty conversation → no leaf/condensed candidates). This is the Grynn
+    // "live context still exceeds target" terminal exhaustion: the sweep cannot
+    // reduce the host's observed live tokens, so it never gets under target.
+    await engine.getCompactionMaintenanceStore().requestProactiveCompactionDebt({
+      conversationId: conversation.conversationId,
+      reason: "threshold",
+      tokenBudget: 4096,
+      currentTokenCount: 8000,
+    });
+
+    const privateEngine = engine as unknown as {
+      drainDeferredCompactionDebtIfIdle: (params: unknown) => Promise<void>;
+    };
+    await privateEngine.drainDeferredCompactionDebtIfIdle({
+      conversationId: conversation.conversationId,
+      sessionId,
+      tokenBudget: 4096,
+      currentTokenCount: 8000,
+      reason: "threshold",
+    });
+
+    const m = await engine
+      .getCompactionMaintenanceStore()
+      .getConversationCompactionMaintenance(conversation.conversationId);
+
+    // FIXED behavior (exhaustion handling): no compactable candidates while over
+    // target is NON-retryable → debt clears and retry does not climb. On current
+    // (unfixed) code this stays pending=true with failure "live context still
+    // exceeds target" → the wedge.
+    expect(
+      m?.pending,
+      "exhausted (no candidates) over-target threshold debt must NOT stay pending forever",
+    ).toBe(false);
+    expect(m?.retryAttempts ?? 0, "must not accumulate retry attempts on exhaustion").toBe(0);
+  });
 });
