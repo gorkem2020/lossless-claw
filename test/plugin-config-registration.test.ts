@@ -1,4 +1,4 @@
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -15,6 +15,10 @@ vi.mock("openclaw/plugin-sdk/core", () => ({
   buildMemorySystemPromptAddition: buildMemorySystemPromptAdditionMock,
 }));
 
+vi.mock("openclaw/plugin-sdk/logging-core", () => ({
+  redactSensitiveText: (text: string) => text,
+}));
+
 type RegisteredEngineFactory = (() => unknown) | undefined;
 type HookHandler = (event: unknown, context: unknown) => unknown;
 type RegisteredContextEngine = { id: string; factory: () => unknown };
@@ -28,10 +32,11 @@ function buildApi(
   options?: {
     includeModelAuth?: boolean;
     includeRuntimeLlm?: boolean;
-    agentDir?: string;
-    runtimeConfig?: Record<string, unknown>;
-    registrationMode?: string;
-  },
+	    agentDir?: string;
+	    runtimeConfig?: Record<string, unknown>;
+	    registrationMode?: string;
+	    shouldLogVerbose?: boolean;
+	  },
 ): {
   api: OpenClawPluginApi;
   getFactory: () => RegisteredEngineFactory;
@@ -91,12 +96,14 @@ function buildApi(
               resolveApiKeyForProvider: vi.fn(async () => undefined),
             },
           }),
-      config: {
-        loadConfig: vi.fn(() => options?.runtimeConfig ?? {}),
-      },
-      logging: {
-        getChildLogger: vi.fn(() => ({
-          info: infoLog,
+	      config: {
+	        current: vi.fn(() => options?.runtimeConfig ?? {}),
+	        loadConfig: vi.fn(() => options?.runtimeConfig ?? {}),
+	      },
+	      logging: {
+	        shouldLogVerbose: vi.fn(() => options?.shouldLogVerbose ?? false),
+	        getChildLogger: vi.fn(() => ({
+	          info: infoLog,
           warn: warnLog,
           error: errorLog,
           debug: debugLog,
@@ -337,23 +344,32 @@ describe("lcm plugin registration", () => {
   it("uses api.pluginConfig values during register", { timeout: 20000 }, () => {
     const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
     dbPaths.add(dbPath);
+    const logDir = mkdtempSync(join(tmpdir(), "lossless-claw-plugin-log-"));
+    tempDirs.add(logDir);
+    const logFile = join(logDir, "lcm.log");
 
-    const { api, getFactory, debugLog, infoLog, sessionInfoLog } = buildApi({
-      enabled: true,
-      contextThreshold: 0.33,
-      incrementalMaxDepth: -1,
-      freshTailCount: 7,
-      promptAwareEviction: false,
-      leafChunkTokens: 80000,
-      newSessionRetainDepth: 4,
-      dbPath,
-      ignoreSessionPatterns: ["agent:*:cron:**", "agent:main:subagent:**"],
-      statelessSessionPatterns: ["agent:*:subagent:**"],
-      skipStatelessSessions: true,
-      transcriptGcEnabled: true,
-      proactiveThresholdCompactionMode: "inline",
-      largeFileThresholdTokens: 12345,
-    });
+    const { api, getFactory, debugLog, infoLog, sessionInfoLog } = buildApi(
+      {
+        enabled: true,
+        contextThreshold: 0.33,
+        incrementalMaxDepth: -1,
+        freshTailCount: 7,
+        promptAwareEviction: false,
+        leafChunkTokens: 80000,
+        newSessionRetainDepth: 4,
+        dbPath,
+        ignoreSessionPatterns: ["agent:*:cron:**", "agent:main:subagent:**"],
+        statelessSessionPatterns: ["agent:*:subagent:**"],
+        skipStatelessSessions: true,
+        transcriptGcEnabled: true,
+        proactiveThresholdCompactionMode: "inline",
+        largeFileThresholdTokens: 12345,
+        independentLogFile: {
+          file: logFile,
+        },
+      },
+      { shouldLogVerbose: true },
+    );
     lcmPlugin.register(api);
     expect(api.registerCommand).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -411,7 +427,8 @@ describe("lcm plugin registration", () => {
       "[lcm] Compaction summarization model: (unconfigured)",
     );
     expect(sessionInfoLog).not.toHaveBeenCalled();
-    expect(debugLog).toHaveBeenCalledWith(expect.stringContaining("[lcm] Migration successful"));
+    expect(debugLog).not.toHaveBeenCalledWith(expect.stringContaining("[lcm] Migration successful"));
+    expect(readFileSync(logFile, "utf8")).toContain("[lcm] Migration successful");
     expect(api.on).toHaveBeenCalledWith("before_reset", expect.any(Function));
     expect(api.on).toHaveBeenCalledWith("session_end", expect.any(Function));
   });
@@ -966,6 +983,9 @@ describe("lcm plugin registration", () => {
   it("dedupes startup banner logs across repeated registration and engine construction", () => {
     const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
     dbPaths.add(dbPath);
+    const logDir = mkdtempSync(join(tmpdir(), "lossless-claw-plugin-log-"));
+    tempDirs.add(logDir);
+    const logFile = join(logDir, "lcm.log");
 
     const pluginConfig = {
       enabled: true,
@@ -975,9 +995,12 @@ describe("lcm plugin registration", () => {
       statelessSessionPatterns: ["agent:*:subagent:**"],
       skipStatelessSessions: true,
       proactiveThresholdCompactionMode: "deferred",
+      independentLogFile: {
+        file: logFile,
+      },
     };
-    const first = buildApi(pluginConfig);
-    const second = buildApi(pluginConfig);
+    const first = buildApi(pluginConfig, { shouldLogVerbose: true });
+    const second = buildApi(pluginConfig, { shouldLogVerbose: true });
     lcmPlugin.register(first.api);
     lcmPlugin.register(second.api);
 
@@ -1017,8 +1040,9 @@ describe("lcm plugin registration", () => {
     expect(firstSessionMessages).toEqual([]);
     expect(secondSessionMessages).toEqual([]);
     expect(debugMessages).toEqual(
-      expect.arrayContaining([expect.stringContaining("[lcm] Migration successful")]),
+      expect.not.arrayContaining([expect.stringContaining("[lcm] Migration successful")]),
     );
+    expect(readFileSync(logFile, "utf8")).toContain("[lcm] Migration successful");
     expect(firstMessages).toEqual(
       expect.not.arrayContaining([expect.stringContaining("[lcm] Migration successful")]),
     );
