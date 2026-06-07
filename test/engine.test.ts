@@ -13748,6 +13748,99 @@ describe("LcmContextEngine fidelity and token budget", () => {
     expect(maintenance?.running).toBe(false);
   });
 
+  it("afterTurn drains threshold debt even when cache telemetry stays hot", async () => {
+    const engine = createEngine();
+    const sessionId = "after-turn-hot-cache-threshold-drain";
+    const conversation = await engine.getConversationStore().getOrCreateConversation(sessionId, {
+      sessionKey: undefined,
+    });
+    await engine.getCompactionTelemetryStore().upsertConversationCompactionTelemetry({
+      conversationId: conversation.conversationId,
+      cacheState: "hot",
+      consecutiveColdObservations: 0,
+      retention: "long",
+      lastObservedCacheHitAt: new Date("2026-05-31T12:00:00.000Z"),
+      lastObservedCacheRead: 123_000,
+      lastObservedPromptTokenCount: 189_666,
+    });
+
+    const privateEngine = engine as unknown as {
+      compaction: {
+        evaluate: (
+          conversationId: number,
+          tokenBudget: number,
+          observed?: number,
+        ) => Promise<unknown>;
+      };
+      executeCompactionCore: (params: unknown) => Promise<unknown>;
+    };
+    vi.spyOn(privateEngine.compaction, "evaluate").mockResolvedValue({
+      shouldCompact: true,
+      reason: "threshold",
+      currentTokens: 189_666,
+      threshold: 102_400,
+    });
+    const executeCompactionCoreSpy = vi.spyOn(
+      privateEngine,
+      "executeCompactionCore",
+    ).mockResolvedValue({
+      ok: true,
+      compacted: true,
+      reason: "compacted",
+    });
+
+    await engine.afterTurn({
+      sessionId,
+      sessionFile: createSessionFilePath("after-turn-hot-cache-threshold-drain"),
+      messages: [makeMessage({ role: "assistant", content: "fresh hot-cache turn" })],
+      prePromptMessageCount: 0,
+      tokenBudget: 128_000,
+      runtimeContext: {
+        currentTokenCount: 189_666,
+        provider: "openai-codex",
+        model: "gpt-5.5",
+        promptCache: {
+          retention: "long",
+          lastCallUsage: {
+            input: 66_666,
+            cacheRead: 123_000,
+            cacheWrite: 0,
+          },
+          observation: {
+            broke: false,
+          },
+        },
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(executeCompactionCoreSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          conversationId: conversation.conversationId,
+          sessionId,
+          tokenBudget: 128_000,
+          currentTokenCount: 189_666,
+          compactionTarget: "threshold",
+          legacyParams: {
+            provider: "openai-codex",
+            model: "gpt-5.5",
+          },
+        }),
+      );
+    });
+
+    const telemetry = await engine
+      .getCompactionTelemetryStore()
+      .getConversationCompactionTelemetry(conversation.conversationId);
+    const maintenance = await engine
+      .getCompactionMaintenanceStore()
+      .getConversationCompactionMaintenance(conversation.conversationId);
+    expect(telemetry?.cacheState).toBe("hot");
+    expect(telemetry?.consecutiveColdObservations).toBe(0);
+    expect(maintenance?.pending).toBe(false);
+    expect(maintenance?.running).toBe(false);
+  });
+
   it("background deferred drain leaves threshold debt durable when the session is busy", async () => {
     const engine = createEngine();
     const sessionId = "after-turn-background-busy-threshold-debt";
