@@ -64,6 +64,21 @@ describe("createIndependentLcmFileLogger", () => {
     expect(fs.existsSync(path.join(tempDir, "lossless-claw-test.1.log"))).toBe(true);
   });
 
+  it("does not rotate non-regular configured log targets", () => {
+    const file = path.join(tempDir, "lossless-claw-test.log");
+    fs.mkdirSync(file);
+    const logger = createIndependentLcmFileLogger({
+      enabled: true,
+      file,
+      maxFileBytes: 1,
+    });
+
+    logger?.write("warn", "[lcm] should not move directory");
+
+    expect(fs.lstatSync(file).isDirectory()).toBe(true);
+    expect(fs.existsSync(path.join(tempDir, "lossless-claw-test.1.log"))).toBe(false);
+  });
+
   it("does not treat fixed filenames as dated rolling paths", () => {
     const file = path.join(tempDir, "lossless-claw-production.log");
     const logger = createIndependentLcmFileLogger({
@@ -207,6 +222,23 @@ describe("createIndependentLcmFileLogger", () => {
     if (process.platform !== "win32") {
       expect(fs.statSync(file).mode & 0o777).toBe(0o600);
     }
+  });
+
+  it("makes existing configured log files owner-only before appending", () => {
+    const file = path.join(tempDir, "lossless-claw-test.log");
+    fs.writeFileSync(file, "existing\n", { mode: 0o644 });
+    const logger = createIndependentLcmFileLogger({
+      enabled: true,
+      file,
+      maxFileBytes: 1024 * 1024,
+    });
+
+    logger?.write("info", "[lcm] private append");
+
+    if (process.platform !== "win32") {
+      expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    }
+    expect(fs.readFileSync(file, "utf8")).toContain("[lcm] private append");
   });
 
   it("does not write when disabled", () => {

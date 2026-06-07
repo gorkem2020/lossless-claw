@@ -140,11 +140,27 @@ function pruneOldRollingLogs(dir: string): void {
   }
 }
 
-function getCurrentLogFileBytes(file: string): number {
+function getCurrentRegularLogFileBytes(file: string): number | undefined {
   try {
-    return fs.statSync(file).size;
+    const stat = fs.lstatSync(file);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      return undefined;
+    }
+    return stat.size;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return 0;
+    }
+    return undefined;
+  }
+}
+
+function isExistingRegularFile(file: string): boolean {
+  try {
+    const stat = fs.lstatSync(file);
+    return stat.isFile() && !stat.isSymbolicLink();
   } catch {
-    return 0;
+    return false;
   }
 }
 
@@ -157,6 +173,9 @@ function rotatedLogPath(file: string, index: number): string {
 function rotateLogFile(file: string): boolean {
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
+    if (!isExistingRegularFile(file)) {
+      return false;
+    }
     fs.rmSync(rotatedLogPath(file, MAX_ROTATED_LOG_FILES), { force: true });
     for (let index = MAX_ROTATED_LOG_FILES - 1; index >= 1; index -= 1) {
       const from = rotatedLogPath(file, index);
@@ -246,6 +265,9 @@ function appendRegularFileSync(file: string, content: string): boolean {
     if (!fs.fstatSync(fd).isFile()) {
       return false;
     }
+    if (process.platform !== "win32") {
+      fs.fchmodSync(fd, 0o600);
+    }
     fs.writeSync(fd, content, undefined, "utf8");
     return true;
   } catch {
@@ -281,7 +303,11 @@ export function createIndependentLcmFileLogger(
     if (rollingFile) {
       pruneOldRollingLogs(path.dirname(activeFile));
     }
-    currentFileBytes = getCurrentLogFileBytes(activeFile);
+    const bytes = getCurrentRegularLogFileBytes(activeFile);
+    if (bytes === undefined) {
+      return undefined;
+    }
+    currentFileBytes = bytes;
   } catch {
     return undefined;
   }
@@ -296,7 +322,11 @@ export function createIndependentLcmFileLogger(
           if (rollingFile) {
             pruneOldRollingLogs(path.dirname(activeFile));
           }
-          currentFileBytes = getCurrentLogFileBytes(activeFile);
+          const bytes = getCurrentRegularLogFileBytes(activeFile);
+          if (bytes === undefined) {
+            return false;
+          }
+          currentFileBytes = bytes;
         }
 
         const record = {
@@ -307,9 +337,18 @@ export function createIndependentLcmFileLogger(
         };
         const payload = `${JSON.stringify(record)}\n`;
         const payloadBytes = Buffer.byteLength(payload, "utf8");
+        const bytes = getCurrentRegularLogFileBytes(activeFile);
+        if (bytes === undefined) {
+          return false;
+        }
+        currentFileBytes = bytes;
         if (currentFileBytes > 0 && currentFileBytes + payloadBytes > config.maxFileBytes) {
           if (rotateLogFile(activeFile)) {
-            currentFileBytes = getCurrentLogFileBytes(activeFile);
+            const rotatedBytes = getCurrentRegularLogFileBytes(activeFile);
+            if (rotatedBytes === undefined) {
+              return false;
+            }
+            currentFileBytes = rotatedBytes;
           }
         }
         const appended = appendRegularFileSync(activeFile, payload);
