@@ -487,6 +487,9 @@ describe("lcm plugin registration", () => {
     expect(factory).toBeTypeOf("function");
 
     const engine = factory!() as {
+      afterTurn?: unknown;
+      maintain?: unknown;
+      dispose?: unknown;
       assemble: (params: {
         sessionId: string;
         messages: unknown[];
@@ -494,6 +497,9 @@ describe("lcm plugin registration", () => {
         citationsMode?: string;
       }) => Promise<{ systemPromptAddition?: string }>;
     };
+    expect(engine.afterTurn).toBeTypeOf("function");
+    expect(engine.maintain).toBeTypeOf("function");
+    expect(engine.dispose).toBeTypeOf("function");
     const result = await engine.assemble({
       sessionId: "missing-session",
       messages: [],

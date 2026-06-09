@@ -143,19 +143,28 @@ async function loadBuildMemorySystemPromptAdditionModule(): Promise<BuildMemoryS
 class MemorySupplementContextEngine implements ContextEngine {
   readonly info: ContextEngine["info"];
   readonly ingestBatch: ContextEngine["ingestBatch"];
+  readonly afterTurn: ContextEngine["afterTurn"];
   readonly prepareSubagentSpawn: ContextEngine["prepareSubagentSpawn"];
   readonly onSubagentEnded: ContextEngine["onSubagentEnded"];
+  readonly maintain: ContextEngine["maintain"];
+  readonly dispose: ContextEngine["dispose"];
 
   constructor(private readonly inner: ContextEngine) {
     const ingestBatch = inner.ingestBatch?.bind(inner);
+    const afterTurn = inner.afterTurn?.bind(inner);
     const prepareSubagentSpawn = inner.prepareSubagentSpawn?.bind(inner);
     const onSubagentEnded = inner.onSubagentEnded?.bind(inner);
+    const maintain = inner.maintain?.bind(inner);
+    const dispose = inner.dispose?.bind(inner);
     this.info = inner.info;
     this.ingestBatch = ingestBatch ? (params) => ingestBatch(params) : undefined;
+    this.afterTurn = afterTurn ? (params) => afterTurn(params) : undefined;
     this.prepareSubagentSpawn = prepareSubagentSpawn
       ? (params) => prepareSubagentSpawn(params)
       : undefined;
     this.onSubagentEnded = onSubagentEnded ? (params) => onSubagentEnded(params) : undefined;
+    this.maintain = maintain ? (params) => maintain(params) : undefined;
+    this.dispose = dispose ? () => dispose() : undefined;
   }
 
   get config(): unknown {
