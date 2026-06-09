@@ -63,6 +63,20 @@ export type CompactResult = {
   exhausted?: boolean;
 };
 
+export type ContextEngineMaintenanceResult = {
+  changed: boolean;
+  bytesFreed: number;
+  rewrittenEntries: number;
+  reason?: string;
+};
+
+export type ContextEngineMaintenanceRuntimeContext = Record<string, unknown> & {
+  allowDeferredCompactionExecution?: boolean;
+  rewriteTranscriptEntries?: (
+    request: Record<string, unknown>,
+  ) => Promise<ContextEngineMaintenanceResult>;
+};
+
 export type IngestResult = {
   ingested: boolean;
 };
@@ -167,6 +181,19 @@ export type ContextEngine = {
     messages: AgentMessage[];
     isHeartbeat?: boolean;
   }): Promise<IngestBatchResult>;
+  afterTurn?(params: {
+    sessionId: string;
+    sessionKey?: string;
+    sessionFile: string;
+    messages: AgentMessage[];
+    prePromptMessageCount: number;
+    autoCompactionSummary?: string;
+    isHeartbeat?: boolean;
+    tokenBudget?: number;
+    currentTokenCount?: number;
+    runtimeContext?: Record<string, unknown>;
+    legacyCompactionParams?: Record<string, unknown>;
+  }): Promise<void>;
   assemble(params: {
     sessionId: string;
     sessionKey?: string;
@@ -200,4 +227,11 @@ export type ContextEngine = {
     childSessionKey: string;
     reason?: SubagentEndReason;
   }): Promise<void>;
+  maintain?(params: {
+    sessionId: string;
+    sessionFile: string;
+    sessionKey?: string;
+    runtimeContext?: ContextEngineMaintenanceRuntimeContext;
+  }): Promise<ContextEngineMaintenanceResult>;
+  dispose?(): Promise<void>;
 };
