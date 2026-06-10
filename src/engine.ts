@@ -262,6 +262,25 @@ function normalizeRotateTailMessageCount(value: number, branchMessageCount: numb
   return Math.max(1, Math.min(branchMessageCount, Math.floor(value)));
 }
 
+function buildLiveToolOutputFileId(params: {
+  conversationId: number;
+  toolName: string;
+  callId?: string;
+  content: string;
+}): string {
+  const hash = createHash("sha256");
+  hash.update("live-tool-output-v1");
+  hash.update("\0");
+  hash.update(String(params.conversationId));
+  hash.update("\0");
+  hash.update(params.toolName);
+  hash.update("\0");
+  hash.update(params.callId ?? "");
+  hash.update("\0");
+  hash.update(params.content);
+  return `file_${hash.digest("hex").slice(0, 16)}`;
+}
+
 export type RotateSessionStorageResult =
   | {
       kind: "rotated";
@@ -5817,10 +5836,11 @@ export class LcmContextEngine implements ContextEngine {
     /** Optional user query for relevance-based eviction (BM25-lite). When absent or unsearchable, falls back to chronological eviction. */
     prompt?: string;
   }): Promise<AssembleResult> {
+    let liveMessages = params.messages;
     // Return a new fallback array so the runtime hook treats this as assembled
     // context, and remove assistant prefill tails from fallback-only paths.
     const safeFallback = (): AssembleResult => {
-      const msgs = params.messages.slice();
+      const msgs = liveMessages.slice();
       while (msgs.length > 0 && msgs[msgs.length - 1]?.role === "assistant") {
         msgs.pop();
       }
@@ -5873,6 +5893,7 @@ export class LcmContextEngine implements ContextEngine {
         );
         return safeFallback();
       }
+
       const ambiguousRollover =
         await this.findAmbiguousSessionKeyRuntimeRollover({
           phase: "assemble",
@@ -5891,6 +5912,41 @@ export class LcmContextEngine implements ContextEngine {
           sessionId: params.sessionId,
         });
         return safeFallback();
+      }
+
+      // Intercept large tool results in live messages so even degraded
+      // fallback paths send stubbed content to the model. The
+      // afterTurn ingest path also runs `interceptLargeToolResults` on
+      // persisted messages, but live params.messages are sent to the
+      // model before afterTurn runs; without this pre-flight intercept
+      // the degraded live fallback (and even normal assemble for
+      // current-turn tool results) sends raw content while the DB
+      // already has stubbed references.
+      if (this.config.stubLargeToolPayloads) {
+        // Keep the rewritten view local; OpenClaw owns the live message array.
+        const rewrittenMessages = liveMessages.slice();
+        let interceptedAny = false;
+        for (let i = 0; i < liveMessages.length; i++) {
+          const message = liveMessages[i]!;
+          const intercepted = await this.largeFileInterceptor.interceptLargeToolResults({
+            conversationId: conversation.conversationId,
+            message,
+            getFileId: ({ content, toolName, callId }) =>
+              buildLiveToolOutputFileId({
+                conversationId: conversation.conversationId,
+                toolName,
+                callId,
+                content,
+              }),
+          });
+          if (intercepted) {
+            rewrittenMessages[i] = intercepted.rewrittenMessage;
+            interceptedAny = true;
+          }
+        }
+        if (interceptedAny) {
+          liveMessages = rewrittenMessages;
+        }
       }
 
       const tokenBudget = this.applyAssemblyBudgetCap(
@@ -5917,7 +5973,7 @@ export class LcmContextEngine implements ContextEngine {
         }
         return { messages: clamp.messages, estimatedTokens: clamp.serializedTokens };
       };
-      const liveContextTokens = estimateSessionTokenCountForAfterTurn(params.messages);
+      const liveContextTokens = estimateSessionTokenCountForAfterTurn(liveMessages);
       const maintenance = await this.compactionMaintenanceStore.getConversationCompactionMaintenance(
         conversation.conversationId,
       );
@@ -5993,7 +6049,7 @@ export class LcmContextEngine implements ContextEngine {
       }
       if (deferredAssemblyDegradation) {
         const degraded = buildDegradedLiveAssembleResult({
-          liveMessages: params.messages,
+          liveMessages,
           tokenBudget,
         });
         this.deps.log.warn(
@@ -6011,7 +6067,7 @@ export class LcmContextEngine implements ContextEngine {
       if (contextItems.length === 0) {
         if (forkBoundedBootstrap) {
           const boundedFallback = buildForkBoundedLiveFallback({
-            liveMessages: params.messages,
+            liveMessages,
             forkSourceMessageCount,
             tokenBudget,
             bootstrapMaxTokens: resolveBootstrapMaxTokens(this.config),
@@ -6031,14 +6087,14 @@ export class LcmContextEngine implements ContextEngine {
       // raw context items and clearly trails the current live history, keep
       // the live path to avoid dropping prompt context.
       const hasSummaryItems = contextItems.some((item) => item.itemType === "summary");
-      if (!hasSummaryItems && contextItems.length < params.messages.length) {
+      if (!hasSummaryItems && contextItems.length < liveMessages.length) {
         if (forkBoundedBootstrap) {
           this.deps.log.debug(
-            `[lcm] assemble: using bounded fork bootstrap context conversation=${conversation.conversationId} ${sessionLabel} contextItems=${contextItems.length} liveMessages=${params.messages.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
+            `[lcm] assemble: using bounded fork bootstrap context conversation=${conversation.conversationId} ${sessionLabel} contextItems=${contextItems.length} liveMessages=${liveMessages.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
           );
         } else {
           this.deps.log.debug(
-            `[lcm] assemble: falling back to live context conversation=${conversation.conversationId} ${sessionLabel} contextItems=${contextItems.length} liveMessages=${params.messages.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
+            `[lcm] assemble: falling back to live context conversation=${conversation.conversationId} ${sessionLabel} contextItems=${contextItems.length} liveMessages=${liveMessages.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
           );
           return boundedLiveFallback("coverage-trails-live");
         }
@@ -6061,7 +6117,7 @@ export class LcmContextEngine implements ContextEngine {
         ? appendForkBoundedLiveSuffixWithinBudget({
             assembledMessages: assembled.messages,
             assembledEstimatedTokens: assembled.estimatedTokens,
-            liveMessages: params.messages,
+            liveMessages,
             forkSourceMessageCount,
             tokenBudget,
           })
@@ -6077,10 +6133,10 @@ export class LcmContextEngine implements ContextEngine {
 
       // If assembly produced no messages for a non-empty live session,
       // fail safe to the live context.
-      if (preRecallMessages.length === 0 && params.messages.length > 0) {
+      if (preRecallMessages.length === 0 && liveMessages.length > 0) {
         if (forkBoundedBootstrap) {
           const boundedFallback = buildForkBoundedLiveFallback({
-            liveMessages: params.messages,
+            liveMessages,
             forkSourceMessageCount,
             tokenBudget,
             bootstrapMaxTokens: resolveBootstrapMaxTokens(this.config),
@@ -6102,10 +6158,10 @@ export class LcmContextEngine implements ContextEngine {
       // have role "user", so this only fires for raw-message-only DB states where
       // every stored message is role "assistant" or "toolResult".
       const assembledHasUserTurn = preRecallMessages.some((m) => m.role === "user");
-      if (!assembledHasUserTurn && params.messages.length > 0) {
+      if (!assembledHasUserTurn && liveMessages.length > 0) {
         if (forkBoundedBootstrap) {
           const boundedFallback = buildForkBoundedLiveFallback({
-            liveMessages: params.messages,
+            liveMessages,
             forkSourceMessageCount,
             tokenBudget,
             bootstrapMaxTokens: resolveBootstrapMaxTokens(this.config),
@@ -6136,7 +6192,7 @@ export class LcmContextEngine implements ContextEngine {
           conversationId: conversation.conversationId,
           prompt: params.prompt,
           assembledMessages: preRecallMessages,
-          coverageMessages: params.messages.filter(isVolatileLiveInputMessage),
+          coverageMessages: liveMessages.filter(isVolatileLiveInputMessage),
         });
       } catch (error) {
         this.deps.log.warn(
@@ -6171,7 +6227,7 @@ export class LcmContextEngine implements ContextEngine {
       let volatileLiveInputAppend = appendUncoveredVolatileLiveInputsWithinBudget({
         assembledMessages,
         assembledEstimatedTokens,
-        liveMessages: params.messages,
+        liveMessages,
         protectedAssembledIndexes,
         tokenBudget,
         log: this.deps.log,
@@ -6197,7 +6253,7 @@ export class LcmContextEngine implements ContextEngine {
         volatileLiveInputAppend = appendUncoveredVolatileLiveInputsWithinBudget({
           assembledMessages,
           assembledEstimatedTokens,
-          liveMessages: params.messages,
+          liveMessages,
           protectedAssembledIndexes,
           tokenBudget,
           log: this.deps.log,
