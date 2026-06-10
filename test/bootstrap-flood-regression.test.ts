@@ -208,7 +208,7 @@ describe("bootstrap flood regression (PR #280) — round-trip integration", () =
     await simulateMaintainRewrite(engine, conversationId, sessionFile, 35);
 
     // Step 4: Simulate gateway restart — bootstrap again
-    const reconcileSpy = vi.spyOn(engine as any, "reconcileSessionTail");
+    const reconcileSpy = vi.spyOn((engine as any).transcriptReconciler, "reconcileSessionTail");
     const boot2 = await engine.bootstrap({ sessionId, sessionFile });
 
     // Assert: 0 messages re-imported because checkpoint was updated by maintain

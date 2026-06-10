@@ -1348,7 +1348,7 @@ describe("LcmContextEngine.ingest content extraction", () => {
       expect(bootstrapState?.lastProcessedOffset).toBe(sessionFileStats.size);
       expect(bootstrapState?.lastProcessedEntryHash).toMatch(/^[a-f0-9]{64}$/);
 
-      const reconcileSpy = vi.spyOn(engine as any, "reconcileSessionTail");
+      const reconcileSpy = vi.spyOn((engine as any).transcriptReconciler, "reconcileSessionTail");
       const bootstrap = await engine.bootstrap({ sessionId, sessionFile });
       expect(bootstrap).toEqual({
         bootstrapped: false,

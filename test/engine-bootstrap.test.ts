@@ -2561,7 +2561,7 @@ describe("LcmContextEngine.bootstrap", () => {
     expect(first.bootstrapped).toBe(true);
     expect(first.importedMessages).toBe(2);
 
-    const reconcileSpy = vi.spyOn(engine as any, "reconcileSessionTail");
+    const reconcileSpy = vi.spyOn((engine as any).transcriptReconciler, "reconcileSessionTail");
 
     appendSessionMessage(sm, {
       role: "user",
@@ -2789,7 +2789,7 @@ describe("LcmContextEngine.bootstrap", () => {
     const storedAfterPrune = await engine.getConversationStore().getMessages(conversation!.conversationId);
     expect(storedAfterPrune.map((message) => message.content)).toEqual(["seed user", "seed assistant"]);
 
-    const reconcileSpy = vi.spyOn(engine as any, "reconcileSessionTail");
+    const reconcileSpy = vi.spyOn((engine as any).transcriptReconciler, "reconcileSessionTail");
 
     appendSessionMessage(sm, {
       role: "user",
@@ -2835,7 +2835,7 @@ describe("LcmContextEngine.bootstrap", () => {
     const first = await engine.bootstrap({ sessionId, sessionFile });
     expect(first.bootstrapped).toBe(true);
 
-    const reconcileSpy = vi.spyOn(engine as any, "reconcileSessionTail");
+    const reconcileSpy = vi.spyOn((engine as any).transcriptReconciler, "reconcileSessionTail");
 
     appendFileSync(
       sessionFile,
@@ -2878,7 +2878,7 @@ describe("LcmContextEngine.bootstrap", () => {
     const first = await engine.bootstrap({ sessionId, sessionFile });
     expect(first.bootstrapped).toBe(true);
 
-    const reconcileSpy = vi.spyOn(engine as any, "reconcileSessionTail");
+    const reconcileSpy = vi.spyOn((engine as any).transcriptReconciler, "reconcileSessionTail");
 
     appendFileSync(
       sessionFile,
@@ -2954,7 +2954,7 @@ describe("LcmContextEngine.bootstrap", () => {
       content: [{ type: "text", text: "tail assistant" }],
     } as AgentMessage);
 
-    const reconcileSpy = vi.spyOn(engine as any, "reconcileSessionTail");
+    const reconcileSpy = vi.spyOn((engine as any).transcriptReconciler, "reconcileSessionTail");
     const second = await engine.bootstrap({ sessionId, sessionKey, sessionFile });
     expect(second).toEqual({
       bootstrapped: true,
@@ -3013,7 +3013,7 @@ describe("LcmContextEngine.bootstrap", () => {
       content: [{ type: "text", text: "tail assistant" }],
     } as AgentMessage);
 
-    const reconcileSpy = vi.spyOn(engine as any, "reconcileSessionTail");
+    const reconcileSpy = vi.spyOn((engine as any).transcriptReconciler, "reconcileSessionTail");
     const second = await engine.bootstrap({ sessionId, sessionFile });
     expect(second).toEqual({
       bootstrapped: true,
@@ -3112,7 +3112,7 @@ describe("LcmContextEngine.bootstrap", () => {
       closeLcmConnection(rawDb);
     }
 
-    const reconcileSpy = vi.spyOn(engine as any, "reconcileSessionTail");
+    const reconcileSpy = vi.spyOn((engine as any).transcriptReconciler, "reconcileSessionTail");
 
     appendSessionMessage(sm, {
       role: "user",
@@ -3582,7 +3582,7 @@ describe("LcmContextEngine.bootstrap", () => {
     expect(secondBootstrapState).toEqual(staleBootstrapState);
 
     // The next pass drains the remaining backlog and completes reconcile.
-    const reconcileSpy = vi.spyOn(engine as any, "reconcileSessionTail");
+    const reconcileSpy = vi.spyOn((engine as any).transcriptReconciler, "reconcileSessionTail");
     const third = await engine.bootstrap({ sessionId, sessionKey, sessionFile });
     expect(third).toEqual({
       bootstrapped: true,

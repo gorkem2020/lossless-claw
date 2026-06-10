@@ -4382,9 +4382,11 @@ describe("LcmContextEngine fidelity and token budget", () => {
     const shrinkStats = statSync(sessionFile);
     (
       engine as unknown as {
-        afterTurnReconcileFullReadStates: Map<string, { size: number; mtimeMs: number }>;
+        transcriptReconciler: {
+          afterTurnReconcileFullReadStates: Map<string, { size: number; mtimeMs: number }>;
+        };
       }
-    ).afterTurnReconcileFullReadStates.set(`${sessionKey}\u0000${sessionFile}`, {
+    ).transcriptReconciler.afterTurnReconcileFullReadStates.set(`${sessionKey}\u0000${sessionFile}`, {
       size: shrinkStats.size,
       mtimeMs: Math.trunc(shrinkStats.mtimeMs),
     });
