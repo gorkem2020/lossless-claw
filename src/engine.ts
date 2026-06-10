@@ -6297,19 +6297,21 @@ export class LcmContextEngine implements ContextEngine {
       source: "reconcileSessionTail entry-id",
     });
 
-    if (
-      params.existingDbCount > 0 &&
-      missingTail.length > transcriptImportCap(params.existingDbCount)
-    ) {
+    // Entry-id anchored backlogs are exact — lineage is proven by the id
+    // anchor and every import is individually id-verified — so a backlog
+    // beyond the cap drains in bounded oldest-first chunks instead of
+    // freezing, mirroring the anchored content path. The checkpoint does
+    // not advance while a pass is capped, so repeated passes converge.
+    const entryIdImportCap = transcriptImportCap(params.existingDbCount);
+    const entryIdImportCapped =
+      params.existingDbCount > 0 && missingTail.length > entryIdImportCap;
+    const importableTail = entryIdImportCapped
+      ? missingTail.slice(0, entryIdImportCap)
+      : missingTail;
+    if (entryIdImportCapped) {
       this.deps.log.warn(
-        `[lcm] reconcileSessionTail: entry-id import cap exceeded for ${sessionContext} — would import ${missingTail.length} messages (existing: ${params.existingDbCount}). Aborting to prevent flood.`,
+        `[lcm] reconcileSessionTail: entry-id import cap chunking for ${sessionContext} — importing ${importableTail.length}/${missingTail.length} anchored backlog messages this pass (existing: ${params.existingDbCount}, cap: ${entryIdImportCap}); remaining backlog continues next pass`,
       );
-      return {
-        blockedByImportCap: true,
-        blockedReason: "import-cap",
-        importedMessages: 0,
-        hasOverlap: true,
-      };
     }
 
     // Ids on the current leaf path. A persisted row whose entry id is NOT in
@@ -6320,7 +6322,7 @@ export class LcmContextEngine implements ContextEngine {
     let importedMessages = 0;
     let adoptedMessages = 0;
     let restampedMessages = 0;
-    for (const message of missingTail) {
+    for (const message of importableTail) {
       const entryId = getTranscriptEntryId(message)!;
       const stored = toStoredMessage(message);
       const adopted = await this.conversationStore.adoptTranscriptEntryId(
@@ -6358,8 +6360,16 @@ export class LcmContextEngine implements ContextEngine {
     }
 
     this.deps.log.debug(
-      `[lcm] reconcileSessionTail: entry-id path for ${sessionContext} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} anchorIndex=${anchorIndex} missingTail=${missingTail.length} importedMessages=${importedMessages} adoptedMessages=${adoptedMessages} restampedMessages=${restampedMessages}`,
+      `[lcm] reconcileSessionTail: entry-id path for ${sessionContext} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} anchorIndex=${anchorIndex} missingTail=${missingTail.length} importedMessages=${importedMessages} adoptedMessages=${adoptedMessages} restampedMessages=${restampedMessages} capped=${entryIdImportCapped}`,
     );
+    if (entryIdImportCapped) {
+      return {
+        blockedByImportCap: true,
+        blockedReason: "import-cap",
+        importedMessages,
+        hasOverlap: true,
+      };
+    }
     return { blockedByImportCap: false, importedMessages, hasOverlap: true };
   }
 
@@ -6609,19 +6619,34 @@ export class LcmContextEngine implements ContextEngine {
           }
 
           const importCap = transcriptImportCap(existingDbCount);
+          let noAnchorImportCapped = false;
           if (noAnchorImportMessages.length > importCap) {
-            this.deps.log.warn(
-              `[lcm] reconcileSessionTail: no anchor import cap exceeded for ${sessionContext} - would import ${noAnchorImportMessages.length} messages (existing: ${existingDbCount}, cap: ${importCap}, reason: ${params.noAnchorImportReason ?? "unspecified"}). Aborting to prevent flood.`,
-            );
-            this.deps.log.debug(
-              `[lcm] reconcileSessionTail: blocked no-anchor import for ${sessionContext} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} candidateMessages=${noAnchorImportMessages.length} existingDbCount=${existingDbCount} cap=${importCap} overlap=false`,
-            );
-            return {
-              blockedByImportCap: true,
-              blockedReason: "import-cap",
-              importedMessages: 0,
-              hasOverlap: false,
-            };
+            if (allEntryIdBearing) {
+              // A fully id-bearing new epoch is exact (every entry adopts or
+              // imports by verified id), so a large rollover — e.g. a host
+              // rewrite or compaction successor with a kept tail beyond the
+              // cap — drains in bounded oldest-first chunks instead of
+              // freezing before adoption can heal it. After the first chunk
+              // persists ids, the entry-id anchor takes over on later passes.
+              noAnchorImportCapped = true;
+              this.deps.log.warn(
+                `[lcm] reconcileSessionTail: no-anchor entry-id import cap chunking for ${sessionContext} — importing ${importCap}/${noAnchorImportMessages.length} new-epoch messages this pass (existing: ${existingDbCount}, cap: ${importCap}, reason: ${params.noAnchorImportReason ?? "unspecified"}); remaining backlog continues next pass`,
+              );
+              noAnchorImportMessages = noAnchorImportMessages.slice(0, importCap);
+            } else {
+              this.deps.log.warn(
+                `[lcm] reconcileSessionTail: no anchor import cap exceeded for ${sessionContext} - would import ${noAnchorImportMessages.length} messages (existing: ${existingDbCount}, cap: ${importCap}, reason: ${params.noAnchorImportReason ?? "unspecified"}). Aborting to prevent flood.`,
+              );
+              this.deps.log.debug(
+                `[lcm] reconcileSessionTail: blocked no-anchor import for ${sessionContext} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} candidateMessages=${noAnchorImportMessages.length} existingDbCount=${existingDbCount} cap=${importCap} overlap=false`,
+              );
+              return {
+                blockedByImportCap: true,
+                blockedReason: "import-cap",
+                importedMessages: 0,
+                hasOverlap: false,
+              };
+            }
           }
 
           if (params.noAnchorImportReason === "same-path-shrink") {
@@ -6696,8 +6721,19 @@ export class LcmContextEngine implements ContextEngine {
             }
           }
           this.deps.log.warn(
-            `[lcm] reconcileSessionTail: no anchor for ${sessionContext}; imported transcript as new epoch reason=${params.noAnchorImportReason ?? "unspecified"} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} candidateMessages=${noAnchorImportMessages.length} importedMessages=${importedMessages} adoptedMessages=${adoptedMessages} overlap=${adoptedMessages > 0}`,
+            `[lcm] reconcileSessionTail: no anchor for ${sessionContext}; imported transcript as new epoch reason=${params.noAnchorImportReason ?? "unspecified"} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} candidateMessages=${noAnchorImportMessages.length} importedMessages=${importedMessages} adoptedMessages=${adoptedMessages} capped=${noAnchorImportCapped} overlap=${adoptedMessages > 0}`,
           );
+          if (noAnchorImportCapped) {
+            // Partial pass: keep the checkpoint un-advanced so the next pass
+            // continues the drain (via the entry-id anchor once this chunk's
+            // ids are persisted).
+            return {
+              blockedByImportCap: true,
+              blockedReason: "import-cap",
+              importedMessages,
+              hasOverlap: adoptedMessages > 0,
+            };
+          }
           // Adoption proves the "new epoch" overlaps persisted history (the
           // host re-issued ids for messages we already hold), so report the
           // overlap — the caller then refreshes the checkpoint instead of
@@ -6729,23 +6765,26 @@ export class LcmContextEngine implements ContextEngine {
       source: "reconcileSessionTail",
     });
 
-    if (existingDbCount > 0 && missingTail.length > transcriptImportCap(existingDbCount)) {
+    // Anchored missing tails are this conversation's own continuation
+    // (lineage proven by the identity anchor), so a tail larger than the
+    // cap must not freeze reconcile forever — that wedges afterTurn
+    // persistence while the backlog keeps growing. Import a capped
+    // oldest-first chunk per pass instead: order is preserved, per-pass
+    // flood exposure stays bounded, and the growing existing count raises
+    // the cap so repeated passes converge. The checkpoint/frontier still
+    // does not advance until the backlog fully drains (blockedByImportCap
+    // stays true on partial passes).
+    const anchoredImportCap = transcriptImportCap(existingDbCount);
+    const importCapped = existingDbCount > 0 && missingTail.length > anchoredImportCap;
+    const importableTail = importCapped ? missingTail.slice(0, anchoredImportCap) : missingTail;
+    if (importCapped) {
       this.deps.log.warn(
-        `[lcm] reconcileSessionTail: import cap exceeded for ${sessionContext} — would import ${missingTail.length} messages (existing: ${existingDbCount}). Aborting to prevent flood.`,
+        `[lcm] reconcileSessionTail: import cap chunking for ${sessionContext} — importing ${importableTail.length}/${missingTail.length} anchored backlog messages this pass (existing: ${existingDbCount}, cap: ${anchoredImportCap}); remaining backlog continues next pass`,
       );
-      this.deps.log.debug(
-        `[lcm] reconcileSessionTail: blocked for ${sessionContext} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} missingTail=${missingTail.length} existingDbCount=${existingDbCount}`,
-      );
-      return {
-        blockedByImportCap: true,
-        blockedReason: "import-cap",
-        importedMessages: 0,
-        hasOverlap: true,
-      };
     }
 
     let importedMessages = 0;
-    for (const [index, message] of missingTail.entries()) {
+    for (const [index, message] of importableTail.entries()) {
       const result = await this.ingestSingle({
         sessionId,
         sessionKey: params.sessionKey,
@@ -6756,6 +6795,18 @@ export class LcmContextEngine implements ContextEngine {
       if (result.ingested) {
         importedMessages += 1;
       }
+    }
+
+    if (importCapped) {
+      this.deps.log.debug(
+        `[lcm] reconcileSessionTail: capped chunk for ${sessionContext} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} anchorIndex=${anchorIndex} missingTail=${missingTail.length} importedMessages=${importedMessages} existingDbCount=${existingDbCount} cap=${anchoredImportCap}`,
+      );
+      return {
+        blockedByImportCap: true,
+        blockedReason: "import-cap",
+        importedMessages,
+        hasOverlap: true,
+      };
     }
 
     this.deps.log.debug(
@@ -7766,7 +7817,14 @@ export class LcmContextEngine implements ContextEngine {
               : reason,
         });
         if (reconcile.blockedByImportCap) {
-          return { importedMessages: 0, blockedByImportCap: true, hasOverlap: reconcile.hasOverlap };
+          // Capped passes import a bounded chunk of anchored backlog; report
+          // the partial progress while leaving the checkpoint un-advanced so
+          // the next pass continues the drain.
+          return {
+            importedMessages: reconcile.importedMessages,
+            blockedByImportCap: true,
+            hasOverlap: reconcile.hasOverlap,
+          };
         }
         if (reconcile.importedMessages > 0) {
           this.recordRecentBootstrapImport(
@@ -8529,9 +8587,12 @@ export class LcmContextEngine implements ContextEngine {
           );
 
           if (reconcile.blockedByImportCap) {
+            // Anchored capped passes import a bounded chunk of backlog;
+            // report the partial progress while keeping the checkpoint
+            // un-advanced so the next pass continues the drain.
             return {
               bootstrapped: false,
-              importedMessages: 0,
+              importedMessages: reconcile.importedMessages,
               reason:
                 reconcile.blockedReason === "cross-conversation-raw-id"
                   ? "reconcile duplicate raw ids"

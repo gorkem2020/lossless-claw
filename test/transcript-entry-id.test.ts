@@ -925,4 +925,108 @@ describe("stale entry-id adoption after host history rewrites", () => {
     expect(rows.map((row) => row.content)).toEqual(["hello", "hi there", "hello"]);
     expect(rows.map((row) => row.transcript_entry_id)).toEqual(["a", "b", "c"]);
   });
+
+  it("drains an over-cap id-bearing new epoch via chunked no-anchor import, then entry-id takeover", async () => {
+    const sessionFile = createSessionFilePath("chunked-new-epoch");
+    const entryWithParent = (
+      id: string,
+      parentId: string | null,
+      role: AgentMessage["role"],
+      text: string,
+    ) =>
+      JSON.stringify({
+        type: "message",
+        id,
+        parentId,
+        timestamp: new Date().toISOString(),
+        message: { role, content: [{ type: "text", text }] },
+      });
+    const epochLines = (headerId: string, idPrefix: string, textPrefix: string) => [
+      headerLine(headerId),
+      ...Array.from({ length: 60 }, (_, index) =>
+        entryWithParent(
+          `${idPrefix}${index}`,
+          index === 0 ? null : `${idPrefix}${index - 1}`,
+          index % 2 === 0 ? "user" : "assistant",
+          `${textPrefix} ${index}`,
+        ),
+      ),
+    ];
+    writeFileSync(
+      sessionFile,
+      epochLines("chunked-epoch-one", "a", "old turn").join("\n") + "\n",
+      "utf8",
+    );
+
+    const logLines: string[] = [];
+    const logCapture = (message: unknown) => {
+      logLines.push(String(message));
+    };
+    const tempDir = createTempDir("lcm-chunked-epoch-");
+    const config = createTestConfig(join(tempDir, "lcm.db"));
+    const deps = createTestDeps(config);
+    deps.log = { info: logCapture, warn: logCapture, error: logCapture, debug: logCapture };
+    const engine = new LcmContextEngine(deps, createLcmDatabaseConnection(config.databasePath));
+    const sessionId = "chunked-new-epoch";
+    await engine.bootstrap({ sessionId, sessionFile });
+    const conversation = await engine
+      .getConversationStore()
+      .getConversationForSession({ sessionId });
+    const conversationId = conversation!.conversationId;
+    expect(await engine.getConversationStore().getMessageCount(conversationId)).toBe(60);
+
+    // Declared rollover to an epoch that shares no content with the DB
+    // (e.g. a successor whose kept tail was fully rewritten): no content
+    // anchor exists and 60 id-bearing candidates exceed the cap (50). The
+    // first pass must import a bounded chunk instead of freezing.
+    writeFileSync(
+      sessionFile,
+      epochLines("chunked-epoch-two", "b", "rewritten turn longer text").join("\n") + "\n",
+      "utf8",
+    );
+    await engine.afterTurn({
+      sessionId,
+      sessionFile,
+      messages: [],
+      prePromptMessageCount: 0,
+    });
+
+    expect(
+      logLines.some((line) =>
+        line.includes(
+          "no-anchor entry-id import cap chunking for conversation=1 session=chunked-new-epoch — importing 50/60 new-epoch messages this pass",
+        ),
+      ),
+      "first pass logs the no-anchor chunk",
+    ).toBe(true);
+    const afterFirstPass = await readRows(engine, conversationId);
+    expect(afterFirstPass, "first pass imports exactly one bounded chunk").toHaveLength(110);
+    expect(afterFirstPass[60]?.transcript_entry_id).toBe("b0");
+    expect(afterFirstPass[109]?.transcript_entry_id).toBe("b49");
+
+    // Second pass: the persisted b-ids give the entry-id planner an anchor,
+    // so the remaining backlog drains through the anchored entry-id path.
+    await engine.afterTurn({
+      sessionId,
+      sessionFile,
+      messages: [],
+      prePromptMessageCount: 0,
+    });
+
+    const afterSecondPass = await readRows(engine, conversationId);
+    expect(afterSecondPass, "no duplicates across the chunked drain").toHaveLength(120);
+    expect(afterSecondPass.slice(60).map((row) => row.transcript_entry_id)).toEqual(
+      Array.from({ length: 60 }, (_, index) => `b${index}`),
+    );
+
+    // Third pass is a no-op: everything is persisted and the checkpoint has
+    // advanced past the rollover.
+    await engine.afterTurn({
+      sessionId,
+      sessionFile,
+      messages: [],
+      prePromptMessageCount: 0,
+    });
+    expect(await engine.getConversationStore().getMessageCount(conversationId)).toBe(120);
+  });
 });

@@ -349,8 +349,10 @@ describe("bootstrap flood regression (PR #280) — round-trip integration", () =
       } as AgentMessage);
     }
 
-    // Bootstrap again — should hit import cap because reconcileSessionTail
-    // would try to import more than max(existingDbCount * 0.2, 50) messages
+    // Bootstrap again — reconcileSessionTail finds more backlog than
+    // max(existingDbCount * 0.2, 50) and imports a bounded oldest-first
+    // chunk per pass instead of freezing reconcile.
+    const initialCap = Math.max(Math.floor(dbCountAfterBoot * 0.2), 50);
     const boot2 = await engine.bootstrap({ sessionId, sessionFile });
 
     expect(
@@ -359,17 +361,47 @@ describe("bootstrap flood regression (PR #280) — round-trip integration", () =
     ).toBe("reconcile import capped");
     expect(
       boot2.importedMessages,
-      "should import 0 messages when cap fires",
-    ).toBe(0);
+      "capped pass imports exactly one bounded chunk",
+    ).toBe(initialCap);
 
-    // Verify no new messages were added to DB
-    const dbCountAfterFlood = await engine
+    const dbCountAfterFirstChunk = await engine
       .getConversationStore()
       .getMessageCount(conversationId);
     expect(
-      dbCountAfterFlood,
-      "DB message count should not change after capped import",
-    ).toBe(dbCountAfterBoot);
+      dbCountAfterFirstChunk,
+      "DB grows by exactly the capped chunk",
+    ).toBe(dbCountAfterBoot + initialCap);
+
+    // Repeated passes converge: every pass stays under its cap and the
+    // backlog fully drains with no duplicates.
+    let lastResult = boot2;
+    let passes = 0;
+    while (lastResult.reason === "reconcile import capped" && passes < 10) {
+      const countBefore = await engine
+        .getConversationStore()
+        .getMessageCount(conversationId);
+      const cap = Math.max(Math.floor(countBefore * 0.2), 50);
+      lastResult = await engine.bootstrap({ sessionId, sessionFile });
+      expect(
+        lastResult.importedMessages,
+        "every pass stays within its import cap",
+      ).toBeLessThanOrEqual(cap);
+      passes += 1;
+    }
+
+    const dbCountAfterDrain = await engine
+      .getConversationStore()
+      .getMessageCount(conversationId);
+    expect(
+      dbCountAfterDrain,
+      "backlog fully drains across capped passes",
+    ).toBe(dbCountAfterBoot + 200);
+
+    // No duplicates: every flood message imported exactly once.
+    const allMessages = await engine.getConversationStore().getMessages(conversationId);
+    const floodMessages = allMessages.filter((m) => m.content.includes("extra flood message"));
+    expect(floodMessages).toHaveLength(200);
+    expect(new Set(floodMessages.map((m) => m.content)).size).toBe(200);
   });
 
   it("no duplicate messages or seq numbers after bootstrap-maintain-bootstrap cycle", async () => {
@@ -469,16 +501,21 @@ describe("bootstrap flood regression (PR #280) — round-trip integration", () =
       } as AgentMessage);
     }
 
-    // Phase 4: Bootstrap with stale checkpoint — import cap should block
+    // Phase 4: Bootstrap with stale checkpoint — the cap bounds the pass to
+    // one oldest-first chunk; the checkpoint must not advance while capped.
+    const countBeforeCappedPass = await engine
+      .getConversationStore()
+      .getMessageCount(conversationId);
+    const cap = Math.max(Math.floor(countBeforeCappedPass * 0.2), 50);
     const boot3 = await engine.bootstrap({ sessionId, sessionFile });
     expect(boot3.reason, "cap should fire with stale checkpoint").toBe("reconcile import capped");
-    expect(boot3.importedMessages, "no messages imported when capped").toBe(0);
+    expect(boot3.importedMessages, "capped pass imports one bounded chunk").toBe(cap);
 
-    // DB unchanged throughout
+    // DB grows by exactly the bounded chunk — no unbounded flood.
     const finalCount = await engine.getConversationStore().getMessageCount(conversationId);
     expect(
       finalCount,
-      "DB message count should be unchanged after capped flood attempt",
-    ).toBe(dbCountAfterBoot);
+      "DB message count grows by exactly the capped chunk",
+    ).toBe(countBeforeCappedPass + cap);
   });
 });
