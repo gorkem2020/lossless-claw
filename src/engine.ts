@@ -6263,6 +6263,13 @@ export class LcmContextEngine implements ContextEngine {
         continue;
       }
       const stored = toStoredMessage(message);
+      // Empty stored content (pure tool-call rows) matches trivially against
+      // legacy unstamped rows and proves nothing — and "adopting" onto a
+      // random old empty row would mis-stamp it. Only non-empty identities
+      // indicate a real flush-lagged runtime row.
+      if (stored.content.trim().length === 0) {
+        continue;
+      }
       if (
         await this.conversationStore.hasUnstampedMessageByIdentity(
           params.conversationId,

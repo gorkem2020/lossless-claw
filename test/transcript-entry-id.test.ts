@@ -1171,4 +1171,67 @@ describe("repeated identical tool calls (lossless-claw-3071)", () => {
       "question two",
     ]);
   });
+
+  it("legacy unstamped empty-content rows do not false-flag flush-lag adoption", async () => {
+    const sessionFile = createSessionFilePath("repeat-empty-content-legacy");
+    // Conversation with a LEGACY unstamped empty-content assistant row (the
+    // stored shape of pre-migration pure tool-call messages). On the live
+    // incident lane, thousands of these matched every appended tool-call
+    // message by identity and forced full reconciliation per iteration.
+    const engine = createEngine();
+    const sessionId = "repeat-empty-content-legacy";
+    const conversation = await engine
+      .getConversationStore()
+      .getOrCreateConversation(sessionId, { sessionKey: undefined });
+    await engine.getConversationStore().createMessage({
+      conversationId: conversation.conversationId,
+      seq: 1,
+      role: "assistant",
+      content: "",
+      tokenCount: 0,
+    });
+    await engine.getConversationStore().createMessage({
+      conversationId: conversation.conversationId,
+      seq: 2,
+      role: "user",
+      content: "anchor question",
+      tokenCount: 4,
+    });
+
+    const callText = "";
+    let lines = `${header}\n${entryLine("legacy-1", null, "user", "anchor question")}\n`;
+    writeFileSync(sessionFile, lines, "utf8");
+    await engine.afterTurn({
+      sessionId,
+      sessionFile,
+      messages: [],
+      prePromptMessageCount: 0,
+    });
+
+    // Appended pure-tool-call pair: assistant content stores as empty.
+    lines += `${JSON.stringify({
+      type: "message",
+      id: "legacy-2",
+      parentId: "legacy-1",
+      timestamp: new Date().toISOString(),
+      message: {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "call_x", name: "read", arguments: { path: "f" } },
+        ],
+      },
+    })}\n${entryLine("legacy-3", "legacy-2", "toolResult", "file contents here")}\n`;
+    writeFileSync(sessionFile, lines, "utf8");
+    await engine.afterTurn({
+      sessionId,
+      sessionFile,
+      messages: [],
+      prePromptMessageCount: 0,
+    });
+
+    const fallbacks = engineWarn(engine).mock.calls
+      .map((call: unknown[]) => String(call[0]))
+      .filter((message: string) => message.includes("falling back to full reconciliation"));
+    expect(fallbacks).toEqual([]);
+  });
 });
