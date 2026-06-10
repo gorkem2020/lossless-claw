@@ -6680,31 +6680,46 @@ describe("LcmContextEngine.bootstrap", () => {
     }
 
     const second = await engine.bootstrap({ sessionId, sessionKey, sessionFile });
+    // Anchored backlog over the cap imports a bounded oldest-first chunk
+    // instead of freezing; the checkpoint must still not advance.
     expect(second).toEqual({
       bootstrapped: false,
-      importedMessages: 0,
+      importedMessages: 50,
       reason: "reconcile import capped",
     });
     expect(warnLog).toHaveBeenCalledWith(
-      `[lcm] reconcileSessionTail: entry-id import cap exceeded for conversation=${conversation!.conversationId} session=${sessionId} sessionKey=${sessionKey} — would import 60 messages (existing: 2). Aborting to prevent flood.`,
+      `[lcm] reconcileSessionTail: entry-id import cap chunking for conversation=${conversation!.conversationId} session=${sessionId} sessionKey=${sessionKey} — importing 50/60 anchored backlog messages this pass (existing: 2, cap: 50); remaining backlog continues next pass`,
     );
 
     const storedAfterCap = await engine.getConversationStore().getMessages(conversation!.conversationId);
-    expect(storedAfterCap.map((message) => message.content)).toEqual(["seed user", "seed assistant"]);
+    expect(storedAfterCap).toHaveLength(52);
+    expect(storedAfterCap.slice(0, 2).map((message) => message.content)).toEqual([
+      "seed user",
+      "seed assistant",
+    ]);
+    expect(storedAfterCap[2]?.content).toBe("missing tail 0");
+    expect(storedAfterCap[51]?.content).toBe("missing tail 49");
 
     const secondBootstrapState = await engine
       .getSummaryStore()
       .getConversationBootstrapState(conversation!.conversationId);
     expect(secondBootstrapState).toEqual(staleBootstrapState);
 
+    // The next pass drains the remaining backlog and completes reconcile.
     const reconcileSpy = vi.spyOn(engine as any, "reconcileSessionTail");
     const third = await engine.bootstrap({ sessionId, sessionKey, sessionFile });
     expect(third).toEqual({
-      bootstrapped: false,
-      importedMessages: 0,
-      reason: "reconcile import capped",
+      bootstrapped: true,
+      importedMessages: 10,
+      reason: "reconciled missing session messages",
     });
     expect(reconcileSpy).toHaveBeenCalledTimes(1);
+
+    const storedAfterDrain = await engine
+      .getConversationStore()
+      .getMessages(conversation!.conversationId);
+    expect(storedAfterDrain).toHaveLength(62);
+    expect(storedAfterDrain[61]?.content).toBe("missing tail 59");
   });
 
   it("uses the live ingest path for initial bootstrap", async () => {
