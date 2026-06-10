@@ -5,7 +5,6 @@ import type { FileHandle } from "node:fs/promises";
 import { join, resolve as resolvePath } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { createInterface } from "node:readline";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type {
   ContextEngine,
   ContextEngineInfo,
@@ -87,6 +86,20 @@ import {
   withExclusiveDatabaseLock,
 } from "./transaction-mutex.js";
 import { sanitizeToolUseResultPairing } from "./transcript-repair.js";
+import {
+  extractBootstrapMessageCandidate,
+  getTranscriptEntryId,
+  isBootstrapMessage,
+  parseBootstrapJsonl,
+  readAppendedLeafPathMessages,
+  readLastJsonlEntryBeforeOffset,
+  readLeafPathMessages,
+  readLeafPathRawEntries,
+  readSessionParentSessionReference,
+  readTranscriptHeader,
+  type TranscriptRawEntry,
+} from "./transcript.js";
+import { resolveEpochRoute, selectEntryIdTail, transcriptImportCap } from "./reconcile-plan.js";
 
 type AgentMessage = Parameters<ContextEngine["ingest"]>[0]["message"];
 type RepairLogger = { warn: (message: string) => void };
@@ -746,17 +759,22 @@ function extractTranscriptToolCallId(message: AgentMessage): string | undefined 
   return undefined;
 }
 
-function listTranscriptToolResultEntryIdsByCallId(sessionFile: string): Map<string, string> {
-  const sessionManager = SessionManager.open(sessionFile);
-  const branch = sessionManager.getBranch();
+async function listTranscriptToolResultEntryIdsByCallId(
+  sessionFile: string,
+): Promise<Map<string, string>> {
+  const leafPathMessages = await readLeafPathMessages(sessionFile);
   const entryIdsByCallId = new Map<string, string>();
   const duplicateCallIds = new Set<string>();
 
-  for (const entry of branch) {
-    if (entry.type !== "message" || entry.message.role !== "toolResult") {
+  for (const message of leafPathMessages) {
+    if (message.role !== "toolResult") {
       continue;
     }
-    const toolCallId = extractTranscriptToolCallId(entry.message as AgentMessage);
+    const entryId = getTranscriptEntryId(message);
+    if (!entryId) {
+      continue;
+    }
+    const toolCallId = extractTranscriptToolCallId(message);
     if (!toolCallId) {
       continue;
     }
@@ -764,7 +782,7 @@ function listTranscriptToolResultEntryIdsByCallId(sessionFile: string): Map<stri
       duplicateCallIds.add(toolCallId);
       continue;
     }
-    entryIdsByCallId.set(toolCallId, entry.id);
+    entryIdsByCallId.set(toolCallId, entryId);
   }
 
   for (const duplicateCallId of duplicateCallIds) {
@@ -1878,158 +1896,6 @@ function extractRuntimePromptTokenCount(runtimeContext?: Record<string, unknown>
   return undefined;
 }
 
-function isBootstrapMessage(value: unknown): value is AgentMessage {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const msg = value as { role?: unknown; content?: unknown; command?: unknown; output?: unknown };
-  if (typeof msg.role !== "string") {
-    return false;
-  }
-  return "content" in msg || ("command" in msg && "output" in msg);
-}
-
-function extractCanonicalBootstrapMessage(value: unknown): AgentMessage | null {
-  if (isBootstrapMessage(value)) {
-    return value;
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  const entry = value as { type?: unknown; message?: unknown };
-  if ("message" in entry) {
-    if (entry.type !== undefined && entry.type !== "message") {
-      return null;
-    }
-    return isBootstrapMessage(entry.message) ? entry.message : null;
-  }
-  return null;
-}
-
-function extractBootstrapMessageCandidate(value: unknown): AgentMessage | null {
-  return extractCanonicalBootstrapMessage(value);
-}
-
-function parseBootstrapJsonl(raw: string, options?: {
-  strict?: boolean;
-}): { messages: AgentMessage[]; sawNonWhitespace: boolean; hadMalformedLine: boolean } {
-  const messages: AgentMessage[] = [];
-  const lines = raw.split(/\r?\n/);
-  let sawNonWhitespace = false;
-  let hadMalformedLine = false;
-  for (const line of lines) {
-    const item = line.trim();
-    if (!item) {
-      continue;
-    }
-    sawNonWhitespace = true;
-    try {
-      const parsed = JSON.parse(item);
-      const candidate = extractBootstrapMessageCandidate(parsed);
-      if (candidate) {
-        messages.push(candidate);
-        continue;
-      }
-    } catch {
-      if (options?.strict) {
-        hadMalformedLine = true;
-      }
-    }
-  }
-  return { messages, sawNonWhitespace, hadMalformedLine };
-}
-
-/** Load recoverable messages from a JSON/JSONL session file without full-file reads for JSONL. */
-async function readLeafPathMessages(sessionFile: string): Promise<AgentMessage[]> {
-  try {
-    let sawNonWhitespace = false;
-    let jsonArrayMode = false;
-    let jsonArrayBuffer = "";
-    const messages: AgentMessage[] = [];
-    const stream = createReadStream(sessionFile, { encoding: "utf8" });
-    const lines = createInterface({
-      input: stream,
-      crlfDelay: Infinity,
-    });
-
-    for await (const line of lines) {
-      if (!sawNonWhitespace) {
-        const trimmed = line.trim();
-        if (trimmed) {
-          sawNonWhitespace = true;
-          if (trimmed.startsWith("[")) {
-            jsonArrayMode = true;
-          }
-        }
-      }
-
-      if (jsonArrayMode) {
-        jsonArrayBuffer += `${line}\n`;
-        continue;
-      }
-
-      const parsed = parseBootstrapJsonl(line);
-      if (parsed.messages.length > 0) {
-        messages.push(...parsed.messages);
-      }
-    }
-
-    if (jsonArrayMode) {
-      const trimmed = jsonArrayBuffer.trim();
-      if (!trimmed) {
-        return [];
-      }
-      try {
-        const parsed = JSON.parse(trimmed);
-        if (!Array.isArray(parsed)) {
-          return [];
-        }
-        return parsed.filter(isBootstrapMessage);
-      } catch {
-        return [];
-      }
-    }
-
-    return messages;
-  } catch {
-    return [];
-  }
-}
-
-async function readSessionParentSessionReference(sessionFile: string): Promise<string | null> {
-  try {
-    const stream = createReadStream(sessionFile, { encoding: "utf8" });
-    const lines = createInterface({
-      input: stream,
-      crlfDelay: Infinity,
-    });
-    try {
-      for await (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) {
-          continue;
-        }
-        try {
-          const parsed = JSON.parse(trimmed) as { type?: unknown; parentSession?: unknown };
-          if (parsed.type !== "session" || typeof parsed.parentSession !== "string") {
-            return null;
-          }
-          const parentSession = parsed.parentSession.trim();
-          return parentSession.length > 0 ? parentSession : null;
-        } catch {
-          return null;
-        }
-      }
-    } finally {
-      lines.close();
-      stream.destroy();
-    }
-  } catch {
-    return null;
-  }
-  return null;
-}
-
 /**
  * Resolve the first-time bootstrap token budget.
  *
@@ -2092,126 +1958,6 @@ function trimBootstrapMessagesToBudget(messages: AgentMessage[], maxTokens: numb
 
   kept.reverse();
   return kept;
-}
-
-async function readFileSegment(sessionFile: string, offset: number): Promise<string | null> {
-  let fh: FileHandle | null = null;
-  try {
-    fh = await open(sessionFile, "r");
-    const stats = await fh.stat();
-    const safeOffset = Math.max(0, Math.min(Math.floor(offset), stats.size));
-    const length = stats.size - safeOffset;
-    if (length <= 0) {
-      return "";
-    }
-    const buffer = Buffer.alloc(length);
-    await fh.read(buffer, 0, length, safeOffset);
-    return buffer.toString("utf8");
-  } catch {
-    return null;
-  } finally {
-    await fh?.close();
-  }
-}
-
-async function readLastJsonlEntryBeforeOffset(
-  sessionFile: string,
-  offset: number,
-  messageOnly = false,
-  matcher?: (message: AgentMessage) => boolean,
-): Promise<string | null> {
-  const chunkSize = 16_384;
-  const safeOffset = Math.max(0, Math.floor(offset));
-  if (safeOffset <= 0) {
-    return null;
-  }
-
-  let fh: FileHandle | null = null;
-  try {
-    fh = await open(sessionFile, "r");
-    let cursor = safeOffset;
-    let carry = "";
-    while (true) {
-      const trimmedEnd = carry.replace(/\s+$/u, "");
-      if (trimmedEnd) {
-        const newlineIndex = Math.max(trimmedEnd.lastIndexOf("\n"), trimmedEnd.lastIndexOf("\r"));
-        if (newlineIndex >= 0) {
-          const candidate = trimmedEnd.slice(newlineIndex + 1).trim();
-          if (candidate) {
-            if (messageOnly) {
-              let matchedMessage: AgentMessage | null = null;
-              try {
-                matchedMessage = extractBootstrapMessageCandidate(JSON.parse(candidate));
-              } catch { /* not valid JSON, skip */ }
-              if (!matchedMessage || (matcher && !matcher(matchedMessage))) {
-                carry = trimmedEnd.slice(0, newlineIndex);
-                continue;
-              }
-            }
-            return candidate;
-          }
-          carry = trimmedEnd.slice(0, newlineIndex);
-          continue;
-        }
-      }
-
-      // No more newlines in current carry — need more data from earlier in the file.
-      if (cursor <= 0) {
-        // Reached start-of-file: whatever is left is the first line.
-        const firstLine = trimmedEnd.trim() || null;
-        if (!firstLine) return null;
-        if (messageOnly) {
-          let matchedMessage: AgentMessage | null = null;
-          try {
-            matchedMessage = extractBootstrapMessageCandidate(JSON.parse(firstLine));
-          } catch { /* not valid JSON */ }
-          if (!matchedMessage || (matcher && !matcher(matchedMessage))) return null;
-        }
-        return firstLine;
-      }
-
-      const start = Math.max(0, cursor - chunkSize);
-      const length = cursor - start;
-      const buffer = Buffer.alloc(length);
-      await fh.read(buffer, 0, length, start);
-      carry = buffer.toString("utf8") + carry;
-      cursor = start;
-    }
-  } catch {
-    return null;
-  } finally {
-    await fh?.close();
-  }
-}
-
-async function readAppendedLeafPathMessages(params: {
-  sessionFile: string;
-  offset: number;
-}): Promise<{ messages: AgentMessage[]; canUseAppendOnly: boolean; sawNonWhitespace: boolean }> {
-  const raw = await readFileSegment(params.sessionFile, params.offset);
-  if (raw == null) {
-    return { messages: [], canUseAppendOnly: false, sawNonWhitespace: false };
-  }
-
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    return { messages: [], canUseAppendOnly: true, sawNonWhitespace: false };
-  }
-
-  if (trimmed.startsWith("[")) {
-    return { messages: [], canUseAppendOnly: false, sawNonWhitespace: true };
-  }
-
-  const parsed = parseBootstrapJsonl(raw, { strict: true });
-  if (parsed.hadMalformedLine) {
-    return { messages: [], canUseAppendOnly: false, sawNonWhitespace: parsed.sawNonWhitespace };
-  }
-
-  return {
-    messages: parsed.messages,
-    canUseAppendOnly: true,
-    sawNonWhitespace: parsed.sawNonWhitespace,
-  };
 }
 
 export type RotateSessionStorageResult =
@@ -3546,6 +3292,16 @@ type TranscriptReconcileResult = {
     | "ambiguous-session-key-runtime-rollover";
   importedMessages: number;
   hasOverlap: boolean;
+  /**
+   * True only when the transcript file was actually read to its frontier and
+   * reconciled into the DB this call (or proven already reconciled). When
+   * true, the transcript is the single persistence source for the turn and
+   * afterTurn must NOT also persist the runtime messages array; flush-lagged
+   * tail messages arrive on the next turn's append-only read, idempotently.
+   * False on every path that allows live runtime persistence because the
+   * transcript was missing, unreadable, or skipped.
+   */
+  transcriptCovered?: boolean;
 };
 
 type AmbiguousSessionKeyRuntimeRollover = {
@@ -6248,12 +6004,175 @@ export class LcmContextEngine implements ContextEngine {
    * Reconcile session-file history with persisted messages and append only the
    * tail that is present in JSONL but missing from LCM.
    */
+  /**
+   * Exact reconciliation for transcripts whose entries all carry stable
+   * envelope ids: anchor on the checkpoint's last processed entry id (or the
+   * newest id already persisted), then import only the tail entries whose
+   * ids are missing — adopting identity-matched rows that were persisted
+   * without an id (runtime flush lag, pre-migration data) instead of
+   * importing duplicates. Entry-id matching is immune to content rewriting
+   * (externalized tool results), which defeats content-identity anchors.
+   *
+   * Returns null when no id lineage links the transcript to this
+   * conversation; the caller's content-identity machinery and no-anchor
+   * guards then decide.
+   */
+  private async reconcileSessionTailByEntryIds(params: {
+    sessionId: string;
+    sessionKey?: string;
+    conversationId: number;
+    historicalMessages: AgentMessage[];
+    entryIds: string[];
+    lastProcessedEntryId?: string | null;
+    existingDbCount: number;
+    sessionContext: string;
+    startedAt: number;
+  }): Promise<TranscriptReconcileResult | null> {
+    const { conversationId, historicalMessages, entryIds, sessionContext, startedAt } = params;
+
+    // Query existence only for the tail when the checkpoint anchor is still
+    // in the transcript; otherwise probe every id to find the newest
+    // persisted one.
+    const checkpointAnchorIndex = params.lastProcessedEntryId
+      ? entryIds.lastIndexOf(params.lastProcessedEntryId)
+      : -1;
+    const knownExisting = await this.conversationStore.filterExistingTranscriptEntryIds(
+      conversationId,
+      checkpointAnchorIndex >= 0 ? entryIds.slice(checkpointAnchorIndex + 1) : entryIds,
+    );
+    const selection = selectEntryIdTail({
+      entryIds,
+      existingEntryIds: knownExisting,
+      lastProcessedEntryId: params.lastProcessedEntryId,
+    });
+
+    if (selection.kind === "no-id-lineage") {
+      return null;
+    }
+    if (selection.kind === "at-tip") {
+      this.deps.log.debug(
+        `[lcm] reconcileSessionTail: entry-id anchor at tip for ${sessionContext} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} importedMessages=0 overlap=true`,
+      );
+      return { blockedByImportCap: false, importedMessages: 0, hasOverlap: true };
+    }
+
+    const anchorIndex = selection.anchorIndex;
+    const candidates = selection.missingIndexes.map((index) => historicalMessages[index]!);
+    const missingTail = this.filterSyntheticHeartbeatTranscriptMessages({
+      messages: candidates,
+      sessionContext,
+      source: "reconcileSessionTail entry-id",
+    });
+
+    if (
+      params.existingDbCount > 0 &&
+      missingTail.length > transcriptImportCap(params.existingDbCount)
+    ) {
+      this.deps.log.warn(
+        `[lcm] reconcileSessionTail: entry-id import cap exceeded for ${sessionContext} — would import ${missingTail.length} messages (existing: ${params.existingDbCount}). Aborting to prevent flood.`,
+      );
+      return {
+        blockedByImportCap: true,
+        blockedReason: "import-cap",
+        importedMessages: 0,
+        hasOverlap: true,
+      };
+    }
+
+    // Ids on the current leaf path. A persisted row whose entry id is NOT in
+    // this set was stranded by a host history rewrite (the suffix was
+    // re-appended under new ids) and is eligible for stale-id re-stamping.
+    const leafEntryIds = new Set(entryIds);
+
+    let importedMessages = 0;
+    let adoptedMessages = 0;
+    let restampedMessages = 0;
+    for (const message of missingTail) {
+      const entryId = getTranscriptEntryId(message)!;
+      const stored = toStoredMessage(message);
+      const adopted = await this.conversationStore.adoptTranscriptEntryId(
+        conversationId,
+        stored.role,
+        stored.content,
+        entryId,
+      );
+      if (adopted) {
+        adoptedMessages += 1;
+        continue;
+      }
+      const restamped = await this.adoptStaleTranscriptEntryId({
+        conversationId,
+        leafEntryIds,
+        role: stored.role,
+        content: stored.content,
+        entryId,
+      });
+      if (restamped) {
+        restampedMessages += 1;
+        continue;
+      }
+      // Entry-id-verified imports are exact (the id is proven absent), so the
+      // same-second replay flood heuristic does not apply.
+      const result = await this.ingestSingle({
+        sessionId: params.sessionId,
+        sessionKey: params.sessionKey,
+        message,
+        skipReplayTimestampFloodGuard: true,
+      });
+      if (result.ingested) {
+        importedMessages += 1;
+      }
+    }
+
+    this.deps.log.debug(
+      `[lcm] reconcileSessionTail: entry-id path for ${sessionContext} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} anchorIndex=${anchorIndex} missingTail=${missingTail.length} importedMessages=${importedMessages} adoptedMessages=${adoptedMessages} restampedMessages=${restampedMessages}`,
+    );
+    return { blockedByImportCap: false, importedMessages, hasOverlap: true };
+  }
+
+  /**
+   * Re-stamp an identity-matched row whose stored entry id has left the
+   * transcript's leaf path. Host history rewrites (rewriteTranscriptEntries,
+   * the host's own tool-result truncation, gateway chat edits) re-append the
+   * active suffix under freshly generated ids; the stranded rows are the
+   * same messages, so they adopt the re-issued id instead of importing a
+   * duplicate. Rows whose ids are still on the leaf path are live entries
+   * and never touched. Returns true when a row was re-stamped.
+   */
+  private async adoptStaleTranscriptEntryId(params: {
+    conversationId: number;
+    leafEntryIds: ReadonlySet<string>;
+    role: StoredMessage["role"];
+    content: string;
+    entryId: string;
+  }): Promise<boolean> {
+    const candidates = await this.conversationStore.listTranscriptEntryIdsByIdentity(
+      params.conversationId,
+      params.role,
+      params.content,
+    );
+    for (const candidate of candidates) {
+      if (params.leafEntryIds.has(candidate.transcriptEntryId)) {
+        continue;
+      }
+      const restamped = await this.conversationStore.restampTranscriptEntryId(
+        candidate.messageId,
+        params.entryId,
+      );
+      if (restamped) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private async reconcileSessionTail(params: {
     sessionId: string;
     sessionKey?: string;
     conversationId: number;
     historicalMessages: AgentMessage[];
     checkpointEntryHash?: string | null;
+    lastProcessedEntryId?: string | null;
     skipContentAnchorScan?: boolean;
     allowNoAnchorImport?: boolean;
     noAnchorImportReason?: string;
@@ -6280,6 +6199,26 @@ export class LcmContextEngine implements ContextEngine {
       return { blockedByImportCap: false, importedMessages: 0, hasOverlap: false };
     }
     const existingDbCount = await this.conversationStore.getMessageCount(conversationId);
+
+    // Exact path: when every transcript entry carries a stable envelope id,
+    // anchor and diff by id instead of content identity.
+    const candidateEntryIds = historicalMessages.map((message) => getTranscriptEntryId(message));
+    if (candidateEntryIds.every((entryId): entryId is string => entryId !== null)) {
+      const entryIdResult = await this.reconcileSessionTailByEntryIds({
+        sessionId,
+        sessionKey: params.sessionKey,
+        conversationId,
+        historicalMessages,
+        entryIds: candidateEntryIds,
+        lastProcessedEntryId: params.lastProcessedEntryId,
+        existingDbCount,
+        sessionContext,
+        startedAt,
+      });
+      if (entryIdResult) {
+        return entryIdResult;
+      }
+    }
 
     const storedHistoricalMessages = historicalMessages.map((message) => toStoredMessage(message));
 
@@ -6397,8 +6336,18 @@ export class LcmContextEngine implements ContextEngine {
             sessionContext,
             source: "reconcileSessionTail no-anchor",
           });
+          // A fully id-bearing batch resolves identity overlaps exactly:
+          // identity matches adopt the re-issued entry id (host rewrites and
+          // rotations re-append the surviving suffix under new ids) and only
+          // genuinely-new entries import. The replay-overlap block below
+          // exists for id-less ambiguity, where overlap could equally mean a
+          // replayed file; applying it here would freeze rewritten-epoch
+          // transcripts instead of healing them.
+          const allEntryIdBearing =
+            noAnchorImportMessages.length > 0 &&
+            noAnchorImportMessages.every((message) => getTranscriptEntryId(message) !== null);
           const replayThreshold = Math.max(3, Math.ceil(historicalMessages.length * 0.5));
-          if (persistedIdentityOverlaps >= replayThreshold) {
+          if (!allEntryIdBearing && persistedIdentityOverlaps >= replayThreshold) {
             if (replayAnalysis.firstNonOverlappingIndex < 0) {
               this.deps.log.warn(
                 `[lcm] reconcileSessionTail: duplicate transcript replay blocked for ${sessionContext} - ${persistedIdentityOverlaps}/${historicalMessages.length} candidate messages already exist (reason: ${params.noAnchorImportReason ?? "unspecified"}). Aborting to prevent replay flood.`,
@@ -6426,7 +6375,7 @@ export class LcmContextEngine implements ContextEngine {
             }
           }
 
-          const importCap = Math.max(Math.floor(existingDbCount * 0.2), 50);
+          const importCap = transcriptImportCap(existingDbCount);
           if (noAnchorImportMessages.length > importCap) {
             this.deps.log.warn(
               `[lcm] reconcileSessionTail: no anchor import cap exceeded for ${sessionContext} - would import ${noAnchorImportMessages.length} messages (existing: ${existingDbCount}, cap: ${importCap}, reason: ${params.noAnchorImportReason ?? "unspecified"}). Aborting to prevent flood.`,
@@ -6464,8 +6413,45 @@ export class LcmContextEngine implements ContextEngine {
             }
           }
 
+          // Ids on the current leaf path, for stale-id re-stamping of rows
+          // stranded by the rewrite/rotation that produced this new epoch.
+          const noAnchorLeafEntryIds = new Set(
+            historicalMessages
+              .map((message) => getTranscriptEntryId(message))
+              .filter((id): id is string => id !== null),
+          );
           let importedMessages = 0;
+          let adoptedMessages = 0;
           for (const message of noAnchorImportMessages) {
+            const entryId = getTranscriptEntryId(message);
+            if (entryId) {
+              const alreadyPersisted = await this.conversationStore.hasMessageByTranscriptEntryId(
+                conversationId,
+                entryId,
+              );
+              if (alreadyPersisted) {
+                continue;
+              }
+              const stored = toStoredMessage(message);
+              const adopted =
+                (await this.conversationStore.adoptTranscriptEntryId(
+                  conversationId,
+                  stored.role,
+                  stored.content,
+                  entryId,
+                )) ||
+                (await this.adoptStaleTranscriptEntryId({
+                  conversationId,
+                  leafEntryIds: noAnchorLeafEntryIds,
+                  role: stored.role,
+                  content: stored.content,
+                  entryId,
+                }));
+              if (adopted) {
+                adoptedMessages += 1;
+                continue;
+              }
+            }
             const result = await this.ingestSingle({
               sessionId,
               sessionKey: params.sessionKey,
@@ -6477,9 +6463,13 @@ export class LcmContextEngine implements ContextEngine {
             }
           }
           this.deps.log.warn(
-            `[lcm] reconcileSessionTail: no anchor for ${sessionContext}; imported transcript as new epoch reason=${params.noAnchorImportReason ?? "unspecified"} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} candidateMessages=${noAnchorImportMessages.length} importedMessages=${importedMessages} overlap=false`,
+            `[lcm] reconcileSessionTail: no anchor for ${sessionContext}; imported transcript as new epoch reason=${params.noAnchorImportReason ?? "unspecified"} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} candidateMessages=${noAnchorImportMessages.length} importedMessages=${importedMessages} adoptedMessages=${adoptedMessages} overlap=${adoptedMessages > 0}`,
           );
-          return { blockedByImportCap: false, importedMessages, hasOverlap: false };
+          // Adoption proves the "new epoch" overlaps persisted history (the
+          // host re-issued ids for messages we already hold), so report the
+          // overlap — the caller then refreshes the checkpoint instead of
+          // re-entering this path every turn.
+          return { blockedByImportCap: false, importedMessages, hasOverlap: adoptedMessages > 0 };
         }
         this.deps.log.debug(
           `[lcm] reconcileSessionTail: no anchor for ${sessionContext} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} importedMessages=0 overlap=false`,
@@ -6506,7 +6496,7 @@ export class LcmContextEngine implements ContextEngine {
       source: "reconcileSessionTail",
     });
 
-    if (existingDbCount > 0 && missingTail.length > Math.max(existingDbCount * 0.2, 50)) {
+    if (existingDbCount > 0 && missingTail.length > transcriptImportCap(existingDbCount)) {
       this.deps.log.warn(
         `[lcm] reconcileSessionTail: import cap exceeded for ${sessionContext} — would import ${missingTail.length} messages (existing: ${existingDbCount}). Aborting to prevent flood.`,
       );
@@ -7086,6 +7076,8 @@ export class LcmContextEngine implements ContextEngine {
             return { importedMessages: 0, blockedByImportCap: false, hasOverlap: true };
           }
           if (batchLooksLikeHeartbeatAckTurn(historicalMessages)) {
+            // Not covered: the runtime batch path owns conversation creation
+            // and heartbeat-ack pruning for brand-new sessions.
             return { importedMessages: 0, blockedByImportCap: false, hasOverlap: true };
           }
           const bootstrapMessages = trimBootstrapMessagesToBudget(
@@ -7131,6 +7123,7 @@ export class LcmContextEngine implements ContextEngine {
             importedMessages,
             blockedByImportCap: bootstrapMessages.length < historicalMessages.length,
             hasOverlap: true,
+            transcriptCovered: true,
           };
         }
 
@@ -7183,7 +7176,14 @@ export class LcmContextEngine implements ContextEngine {
                   `[lcm] afterTurn: skipped heartbeat transcript append-only delta and refreshed checkpoint conversation=${conversation.conversationId} sessionFile=${params.sessionFile} appendedMessages=${appended.messages.length}`,
                 );
               }
-              return { importedMessages: 0, blockedByImportCap: false, hasOverlap: true };
+              // Heartbeat turns are never persisted; the append-only delta is
+              // intentionally skipped, so the transcript counts as covered.
+              return {
+                importedMessages: 0,
+                blockedByImportCap: false,
+                hasOverlap: true,
+                transcriptCovered: true,
+              };
             }
             if (placeholderCheckpoint && appended.messages.length > 0) {
               const reconcile = await this.reconcileSessionTail({
@@ -7204,7 +7204,10 @@ export class LcmContextEngine implements ContextEngine {
                   sessionFile: params.sessionFile,
                 });
               }
-              return reconcile;
+              return {
+                ...reconcile,
+                transcriptCovered: reconcile.hasOverlap || reconcile.importedMessages > 0,
+              };
             }
 
             const appendOnlySessionContext = this.formatSessionLogContext({
@@ -7250,7 +7253,12 @@ export class LcmContextEngine implements ContextEngine {
                   sessionFile: params.sessionFile,
                 });
               }
-              return { importedMessages, blockedByImportCap: false, hasOverlap: true };
+              return {
+                importedMessages,
+                blockedByImportCap: false,
+                hasOverlap: true,
+                transcriptCovered: true,
+              };
             }
           }
         }
@@ -7281,7 +7289,14 @@ export class LcmContextEngine implements ContextEngine {
           this.deps.log.debug(
             `[lcm] afterTurn: transcript reconcile slow path skipped (file state already read this process) conversation=${conversation.conversationId} reason=${reason} sessionFile=${params.sessionFile}`,
           );
-          return { importedMessages: 0, blockedByImportCap: false, hasOverlap: true };
+          // The memo is only populated after a successful covered full read,
+          // and the file has not changed since — still covered.
+          return {
+            importedMessages: 0,
+            blockedByImportCap: false,
+            hasOverlap: true,
+            transcriptCovered: true,
+          };
         }
 
         const rememberSlowReadState = (): void => {
@@ -7439,6 +7454,8 @@ export class LcmContextEngine implements ContextEngine {
               `[lcm] afterTurn: transcript reconcile slow path read empty messages from non-empty file (${sessionFileState?.size ?? "?"} bytes) — skipping checkpoint refresh to avoid dropping messages on parser failure conversation=${conversation.conversationId} sessionFile=${params.sessionFile}`,
             );
           }
+          // An empty transcript cannot carry the turn — let the runtime
+          // batch persist it (transcriptCovered stays false).
           return {
             importedMessages: 0,
             blockedByImportCap: false,
@@ -7477,21 +7494,43 @@ export class LcmContextEngine implements ContextEngine {
           reason === "checkpoint-missing" &&
           (params.allowNoAnchorImportOnCheckpointMissing === true ||
             checkpointMissingMetadataFrontier);
+        // A transcript whose session header id differs from the checkpoint's
+        // is a *declared* epoch change (rewrite/rotation) — no heuristics
+        // needed, so a same-path full rewrite may import as a new epoch
+        // instead of freezing on "no anchor". The no-anchor path's replay
+        // guards and import caps still apply as sanity bounds.
+        const transcriptHeader = await readTranscriptHeader(params.sessionFile);
+        const declaredEpochRollover =
+          resolveEpochRoute({
+            checkpointHeaderId: checkpoint?.sessionHeaderId,
+            transcriptHeaderId: transcriptHeader.sessionHeaderId,
+          }) === "declared-rollover";
+        if (declaredEpochRollover) {
+          this.deps.log.warn(
+            `[lcm] afterTurn: transcript session header changed (${checkpoint?.sessionHeaderId} -> ${transcriptHeader.sessionHeaderId}); treating as declared epoch rollover conversation=${conversation.conversationId} reason=${reason} sessionFile=${params.sessionFile}`,
+          );
+        }
         const reconcile = await this.reconcileSessionTail({
           sessionId: params.sessionId,
           sessionKey: params.sessionKey,
           conversationId: conversation.conversationId,
           historicalMessages,
+          lastProcessedEntryId: declaredEpochRollover
+            ? null
+            : checkpoint?.lastProcessedEntryId ?? null,
           skipContentAnchorScan: reason === "same-path-shrink",
           allowNoAnchorImport:
             reason === "path-mismatch" ||
             reason === "same-path-shrink" ||
+            declaredEpochRollover ||
             recoverCheckpointMissingNoAnchor,
           noAnchorImportReason: recoverCheckpointMissingNoAnchor
             ? params.allowNoAnchorImportOnCheckpointMissing === true
               ? "rotate-checkpoint-missing"
               : "checkpoint-missing-recovery"
-            : reason,
+            : declaredEpochRollover && reason === "append-only-ineligible"
+              ? "declared-epoch-rollover"
+              : reason,
         });
         if (reconcile.blockedByImportCap) {
           return { importedMessages: 0, blockedByImportCap: true, hasOverlap: reconcile.hasOverlap };
@@ -7524,6 +7563,7 @@ export class LcmContextEngine implements ContextEngine {
           importedMessages: reconcile.importedMessages,
           blockedByImportCap: false,
           hasOverlap: reconcile.hasOverlap,
+          transcriptCovered: true,
         };
   }
 
@@ -7579,6 +7619,24 @@ export class LcmContextEngine implements ContextEngine {
   }): Promise<void> {
     const latestDbMessage = await this.conversationStore.getLastMessage(params.conversationId);
     const fileStats = params.fileStats ?? (await stat(params.sessionFile));
+    // The checkpoint marks the whole file processed (offset = size), so the
+    // exact resume anchor is the envelope id of the file's last message entry.
+    let lastProcessedEntryId: string | null = null;
+    const lastEntryLine = await readLastJsonlEntryBeforeOffset(
+      params.sessionFile,
+      fileStats.size,
+      true,
+    );
+    if (lastEntryLine) {
+      try {
+        const parsed = JSON.parse(lastEntryLine) as { id?: unknown; uuid?: unknown };
+        const rawId = typeof parsed.id === "string" ? parsed.id : typeof parsed.uuid === "string" ? parsed.uuid : "";
+        lastProcessedEntryId = rawId.trim() || null;
+      } catch {
+        // Bare-message lines have no envelope id.
+      }
+    }
+    const header = await readTranscriptHeader(params.sessionFile);
     await this.summaryStore.upsertConversationBootstrapState({
       conversationId: params.conversationId,
       sessionFilePath: params.sessionFile,
@@ -7595,6 +7653,8 @@ export class LcmContextEngine implements ContextEngine {
                 tokenCount: latestDbMessage.tokenCount,
               })
             : null,
+      sessionHeaderId: header.sessionHeaderId,
+      lastProcessedEntryId,
       forkBounded: params.forkBounded,
       forkSourceMessageCount: params.forkSourceMessageCount,
     });
@@ -8223,6 +8283,10 @@ export class LcmContextEngine implements ContextEngine {
               transcriptEpochReason === "same-path-shrink"
                 ? undefined
                 : bootstrapState?.lastProcessedEntryHash,
+            lastProcessedEntryId:
+              transcriptEpochReason === "same-path-shrink"
+                ? undefined
+                : bootstrapState?.lastProcessedEntryId,
             skipContentAnchorScan: transcriptEpochReason === "same-path-shrink",
             allowNoAnchorImport: transcriptEpochRotated,
             noAnchorImportReason: transcriptEpochReason,
@@ -8337,6 +8401,67 @@ export class LcmContextEngine implements ContextEngine {
    *    is prepended — synthetic summaries can no longer interfere with
    *    replay detection
    */
+  /**
+   * After a covered transcript reconcile the DB tail IS the transcript
+   * frontier, so the runtime turn delta needs exact alignment, not heuristic
+   * dedup. Three cases:
+   *  - the transcript flushed the whole turn: the batch aligns fully with the
+   *    DB tail — nothing to ingest;
+   *  - the transcript flush lagged mid-turn: a prefix of the batch aligns
+   *    with the DB tail — ingest only the remainder;
+   *  - no tail alignment: a batch with zero persisted-identity overlap is a
+   *    genuinely unflushed new turn (ingest all); any overlap means a stale
+   *    replay snapshot — fail closed, because a covered transcript read will
+   *    deliver anything real on the next turn idempotently.
+   */
+  private async alignRuntimeBatchAgainstCoveredFrontier(
+    sessionId: string,
+    sessionKey: string | undefined,
+    batch: AgentMessage[],
+  ): Promise<AgentMessage[]> {
+    if (batch.length === 0) return batch;
+
+    const conversation = await this.conversationStore.getConversationForSession({
+      sessionId,
+      sessionKey,
+    });
+    if (!conversation) return batch;
+    const conversationId = conversation.conversationId;
+
+    const storedBatch = batch.map((message) => toStoredMessage(message));
+    const tail = await this.conversationStore.getLastMessages(conversationId, batch.length);
+    for (let k = Math.min(tail.length, batch.length); k > 0; k -= 1) {
+      const tailSlice = tail.slice(tail.length - k);
+      let aligned = true;
+      for (let i = 0; i < k; i += 1) {
+        if (
+          messageIdentity(tailSlice[i]!.role, tailSlice[i]!.content) !==
+          messageIdentity(storedBatch[i]!.role, storedBatch[i]!.content)
+        ) {
+          aligned = false;
+          break;
+        }
+      }
+      if (aligned) {
+        return batch.slice(k);
+      }
+    }
+
+    let persistedIdentityOverlaps = 0;
+    for (const stored of storedBatch) {
+      if (await this.conversationStore.hasMessage(conversationId, stored.role, stored.content)) {
+        persistedIdentityOverlaps += 1;
+      }
+    }
+    if (persistedIdentityOverlaps > 0) {
+      this.deps.log.warn(
+        `[lcm] afterTurn: runtime batch does not align with the covered transcript frontier and overlaps persisted history (${persistedIdentityOverlaps}/${batch.length}); failing closed — the transcript reconcile delivers real messages next turn conversation=${conversationId}`,
+      );
+      return [];
+    }
+    return batch;
+  }
+
   private async deduplicateAfterTurnBatch(
     sessionId: string,
     sessionKey: string | undefined,
@@ -8733,7 +8858,7 @@ export class LcmContextEngine implements ContextEngine {
           };
         }
 
-        const transcriptEntryIdsByCallId = listTranscriptToolResultEntryIdsByCallId(
+        const transcriptEntryIdsByCallId = await listTranscriptToolResultEntryIdsByCallId(
           params.sessionFile,
         );
         const replacements: TranscriptRewriteReplacement[] = [];
@@ -8860,6 +8985,20 @@ export class LcmContextEngine implements ContextEngine {
     });
     const conversationId = conversation.conversationId;
 
+    // Exact idempotency: a message imported from a transcript entry whose id
+    // is already persisted is a replay by definition. Skip before any side
+    // effects (large-file interception, parts, context items).
+    const transcriptEntryId = getTranscriptEntryId(message);
+    if (
+      transcriptEntryId &&
+      (await this.conversationStore.hasMessageByTranscriptEntryId(
+        conversationId,
+        transcriptEntryId,
+      ))
+    ) {
+      return { ingested: false };
+    }
+
     let messageForParts = message;
 
     const nativeImageIntercepted = await this.interceptNativeImageBlocks({
@@ -8947,6 +9086,7 @@ export class LcmContextEngine implements ContextEngine {
       role: stored.role,
       content: stored.content,
       tokenCount: stored.tokenCount,
+      transcriptEntryId,
       skipReplayTimestampFloodGuard,
     });
     await this.conversationStore.createMessageParts(
@@ -9130,6 +9270,21 @@ export class LcmContextEngine implements ContextEngine {
       if (transcriptReconcileBlockedByAmbiguousRollover) {
         await runRuntimeAutoRotate();
         return;
+      }
+    } else if (transcriptReconcileResult.transcriptCovered) {
+      // The transcript reconcile read the file to its frontier, so the DB
+      // tail is exact — use precise alignment instead of the heuristic
+      // dedup stack, and persist only what the transcript flush has not
+      // delivered yet.
+      dedupedNewMessages = await this.alignRuntimeBatchAgainstCoveredFrontier(
+        params.sessionId,
+        params.sessionKey,
+        newMessages,
+      );
+      if (newMessages.length > 0 && dedupedNewMessages.length < newMessages.length) {
+        this.deps.log.debug(
+          `[lcm] afterTurn: transcript covered the frontier; runtime batch aligned to ${dedupedNewMessages.length}/${newMessages.length} unflushed messages ${sessionLabel}`,
+        );
       }
     } else {
       dedupedNewMessages = await this.deduplicateAfterTurnBatch(
@@ -11118,9 +11273,13 @@ export class LcmContextEngine implements ContextEngine {
     conversationId: number;
     sessionFile: string;
   }): Promise<RotateTranscriptRewriteResult> {
-    const sessionManager = SessionManager.open(params.sessionFile);
-    const header = sessionManager.getHeader();
-    const branch = sessionManager.getBranch();
+    const { header, entries: branch } = await readLeafPathRawEntries(params.sessionFile);
+    if (!header) {
+      // SessionManager.open used to synthesize a header (and rewrite the
+      // file) here; reading is now side-effect free, so a headerless file is
+      // the host's problem to recover, not ours to rotate.
+      throw new Error("session file has no session header; refusing to rotate");
+    }
     const originalStats = await stat(params.sessionFile);
 
     const messageIndices: number[] = [];
@@ -11139,10 +11298,15 @@ export class LcmContextEngine implements ContextEngine {
         ? (messageIndices[messageIndices.length - keepTailMessageCount] ?? branch.length)
         : branch.length;
 
-    const latestPreludeEntries = new Map<string, (typeof branch)[number]>();
+    const latestPreludeEntries = new Map<string, TranscriptRawEntry>();
     for (let index = 0; index < anchorIndex; index += 1) {
       const entry = branch[index];
-      if (entry && isRotatePreservedEntryType(entry.type) && entry.type !== "message") {
+      if (
+        entry &&
+        typeof entry.type === "string" &&
+        isRotatePreservedEntryType(entry.type) &&
+        entry.type !== "message"
+      ) {
         latestPreludeEntries.set(entry.type, entry);
       }
     }
@@ -11157,7 +11321,7 @@ export class LcmContextEngine implements ContextEngine {
 
     for (let index = anchorIndex; index < branch.length; index += 1) {
       const entry = branch[index];
-      if (entry && isRotatePreservedEntryType(entry.type)) {
+      if (entry && typeof entry.type === "string" && isRotatePreservedEntryType(entry.type)) {
         entriesToKeep.push({ ...entry });
       }
     }
@@ -11167,8 +11331,8 @@ export class LcmContextEngine implements ContextEngine {
     }
 
     let previousEntryId: string | null = null;
-    const linearizedEntries = entriesToKeep.map((entry): (typeof branch)[number] => {
-      const nextEntry = {
+    const linearizedEntries = entriesToKeep.map((entry): TranscriptRawEntry => {
+      const nextEntry: TranscriptRawEntry = {
         ...entry,
         parentId: previousEntryId,
       };

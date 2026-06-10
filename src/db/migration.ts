@@ -339,6 +339,22 @@ function ensureMessageLargeContentColumn(db: DatabaseSync): void {
   }
 }
 
+/**
+ * Transcript-entry-id reconciliation: the stable JSONL envelope id of the
+ * transcript entry a message was imported from. NULL for runtime-array
+ * ingests, legacy rows, and transcripts without envelopes. The partial
+ * unique index makes transcript imports idempotent — replaying a transcript
+ * region can never duplicate rows. See
+ * specs/transcript-reconciliation-by-entry-id.md.
+ */
+function ensureMessageTranscriptEntryIdColumn(db: DatabaseSync): void {
+  const messageColumns = db.prepare(`PRAGMA table_info(messages)`).all() as SummaryColumnInfo[];
+  const hasTranscriptEntryId = messageColumns.some((col) => col.name === "transcript_entry_id");
+  if (!hasTranscriptEntryId) {
+    db.exec(`ALTER TABLE messages ADD COLUMN transcript_entry_id TEXT`);
+  }
+}
+
 function ensureConversationBootstrapStateForkColumns(db: DatabaseSync): void {
   const columns = db
     .prepare(`PRAGMA table_info(conversation_bootstrap_state)`)
@@ -355,6 +371,24 @@ function ensureConversationBootstrapStateForkColumns(db: DatabaseSync): void {
     db.exec(
       `ALTER TABLE conversation_bootstrap_state ADD COLUMN fork_source_message_count INTEGER NOT NULL DEFAULT 0`,
     );
+  }
+}
+
+/**
+ * Declared-epoch reconciliation state: the transcript's session header id
+ * (rewrites/rotations change it) and the envelope id of the last processed
+ * transcript entry (exact resume anchor, immune to content rewriting).
+ * See specs/transcript-reconciliation-by-entry-id.md.
+ */
+function ensureConversationBootstrapStateEpochColumns(db: DatabaseSync): void {
+  const columns = db
+    .prepare(`PRAGMA table_info(conversation_bootstrap_state)`)
+    .all() as SummaryColumnInfo[];
+  if (!columns.some((col) => col.name === "session_header_id")) {
+    db.exec(`ALTER TABLE conversation_bootstrap_state ADD COLUMN session_header_id TEXT`);
+  }
+  if (!columns.some((col) => col.name === "last_processed_entry_id")) {
+    db.exec(`ALTER TABLE conversation_bootstrap_state ADD COLUMN last_processed_entry_id TEXT`);
   }
 }
 
@@ -951,6 +985,7 @@ export function runLcmMigrations(
       content TEXT NOT NULL,
       token_count INTEGER NOT NULL,
       identity_hash TEXT,
+      transcript_entry_id TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE (conversation_id, seq)
     );
@@ -1055,6 +1090,8 @@ export function runLcmMigrations(
       last_seen_mtime_ms INTEGER NOT NULL,
       last_processed_offset INTEGER NOT NULL,
       last_processed_entry_hash TEXT,
+      session_header_id TEXT,
+      last_processed_entry_id TEXT,
       fork_bounded INTEGER NOT NULL DEFAULT 0,
       fork_source_message_count INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -1215,6 +1252,9 @@ export function runLcmMigrations(
     runMigrationStep("ensureConversationBootstrapStateForkColumns", log, () =>
       ensureConversationBootstrapStateForkColumns(db),
     );
+    runMigrationStep("ensureConversationBootstrapStateEpochColumns", log, () =>
+      ensureConversationBootstrapStateEpochColumns(db),
+    );
     // Belt-and-suspenders: ensure message_parts exists even if the bulk
     // CREATE TABLE block above was interrupted before reaching it.
     runMigrationStep("ensureMessagePartsTable", log, () => ensureMessagePartsTable(db));
@@ -1224,6 +1264,18 @@ export function runLcmMigrations(
     runMigrationStep("createMessagesIdentityHashIndex", log, () =>
       db.exec(
         `CREATE INDEX IF NOT EXISTS messages_conv_identity_hash_idx ON messages (conversation_id, identity_hash)`,
+      ),
+    );
+    runMigrationStep("ensureMessageTranscriptEntryIdColumn", log, () =>
+      ensureMessageTranscriptEntryIdColumn(db),
+    );
+    // Partial unique index: NULL entry ids (legacy rows, runtime ingests) are
+    // exempt, so this only enforces idempotency for transcript-imported rows.
+    runMigrationStep("createMessagesTranscriptEntryIdIndex", log, () =>
+      db.exec(
+        `CREATE UNIQUE INDEX IF NOT EXISTS messages_conv_entry_unique_idx
+         ON messages (conversation_id, transcript_entry_id)
+         WHERE transcript_entry_id IS NOT NULL`,
       ),
     );
     runMigrationStep("ensureCompactionTelemetryColumns", log, () =>

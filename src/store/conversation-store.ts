@@ -33,6 +33,13 @@ export type CreateMessageInput = {
   content: string;
   tokenCount: number;
   identityHash?: string;
+  /**
+   * Stable JSONL envelope id of the transcript entry this message was
+   * imported from. Enforced unique per conversation (partial index), so
+   * transcript replays cannot duplicate rows. Null/undefined for runtime
+   * ingests and envelope-less transcripts.
+   */
+  transcriptEntryId?: string | null;
   // Use only when the caller is intentionally importing a fresh transcript epoch.
   skipReplayTimestampFloodGuard?: boolean;
 };
@@ -599,8 +606,8 @@ export class ConversationStore {
 
     const result = this.db
       .prepare(
-        `INSERT INTO messages (conversation_id, seq, role, content, token_count, identity_hash, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages (conversation_id, seq, role, content, token_count, identity_hash, transcript_entry_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         prepared.conversationId,
@@ -609,6 +616,7 @@ export class ConversationStore {
         prepared.content,
         prepared.tokenCount,
         prepared.identityHash,
+        prepared.transcriptEntryId ?? null,
         prepared.createdAt,
       );
 
@@ -637,8 +645,8 @@ export class ConversationStore {
     );
 
     const insertStmt = this.db.prepare(
-      `INSERT INTO messages (conversation_id, seq, role, content, token_count, identity_hash, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO messages (conversation_id, seq, role, content, token_count, identity_hash, transcript_entry_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const selectStmt = this.db.prepare(
       `SELECT message_id, conversation_id, seq, role, content, token_count, created_at, large_content
@@ -654,6 +662,7 @@ export class ConversationStore {
         input.content,
         input.tokenCount,
         input.identityHash,
+        input.transcriptEntryId ?? null,
         input.createdAt,
       );
 
@@ -697,6 +706,23 @@ export class ConversationStore {
     return rows.map(toMessageRecord);
   }
 
+  /** Last `count` messages in seq order (oldest of the tail first). */
+  async getLastMessages(conversationId: ConversationId, count: number): Promise<MessageRecord[]> {
+    if (count <= 0) {
+      return [];
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at, large_content
+       FROM messages
+       WHERE conversation_id = ?
+       ORDER BY seq DESC
+       LIMIT ?`,
+      )
+      .all(conversationId, Math.floor(count)) as unknown as MessageRow[];
+    return rows.reverse().map(toMessageRecord);
+  }
+
   async getLastMessage(conversationId: ConversationId): Promise<MessageRecord | null> {
     const row = this.db
       .prepare(
@@ -727,6 +753,135 @@ export class ConversationStore {
       .get(conversationId, identityHash, role, content) as unknown as CountRow | undefined;
 
     return row?.count === 1;
+  }
+
+  async hasMessageByTranscriptEntryId(
+    conversationId: ConversationId,
+    transcriptEntryId: string,
+  ): Promise<boolean> {
+    const row = this.db
+      .prepare(
+        `SELECT 1 AS count
+       FROM messages
+       WHERE conversation_id = ? AND transcript_entry_id = ?
+       LIMIT 1`,
+      )
+      .get(conversationId, transcriptEntryId) as unknown as CountRow | undefined;
+
+    return row?.count === 1;
+  }
+
+  /**
+   * Stamp a transcript entry id onto the earliest identity-matching row that
+   * has none. Heals rows persisted from the runtime array (flush lag) or
+   * before the entry-id migration when the transcript later delivers the
+   * same message with its envelope id, instead of importing a duplicate.
+   * Returns true when a row was adopted.
+   */
+  async adoptTranscriptEntryId(
+    conversationId: ConversationId,
+    role: MessageRole,
+    content: string,
+    transcriptEntryId: string,
+  ): Promise<boolean> {
+    const identityHash = buildMessageIdentityHash(role, content);
+    const result = this.db
+      .prepare(
+        `UPDATE messages
+       SET transcript_entry_id = ?
+       WHERE message_id = (
+         SELECT message_id
+         FROM messages
+         WHERE conversation_id = ?
+           AND transcript_entry_id IS NULL
+           AND identity_hash = ?
+           AND role = ?
+           AND content = ?
+         ORDER BY seq
+         LIMIT 1
+       )`,
+      )
+      .run(transcriptEntryId, conversationId, identityHash, role, content);
+    return result.changes > 0;
+  }
+
+  /**
+   * List identity-matching rows that already carry a transcript entry id,
+   * oldest first. The engine compares these ids against the transcript's
+   * current leaf path to find rows stranded by a host history rewrite
+   * (rewriteTranscriptEntries re-appends the suffix under new ids).
+   */
+  async listTranscriptEntryIdsByIdentity(
+    conversationId: ConversationId,
+    role: MessageRole,
+    content: string,
+  ): Promise<Array<{ messageId: number; transcriptEntryId: string }>> {
+    const identityHash = buildMessageIdentityHash(role, content);
+    const rows = this.db
+      .prepare(
+        `SELECT message_id, transcript_entry_id
+       FROM messages
+       WHERE conversation_id = ?
+         AND transcript_entry_id IS NOT NULL
+         AND identity_hash = ?
+         AND role = ?
+         AND content = ?
+       ORDER BY seq`,
+      )
+      .all(conversationId, identityHash, role, content) as unknown as Array<{
+      message_id: number;
+      transcript_entry_id: string;
+    }>;
+    return rows.map((row) => ({
+      messageId: row.message_id,
+      transcriptEntryId: row.transcript_entry_id,
+    }));
+  }
+
+  /**
+   * Replace a row's stale transcript entry id with the id the host re-issued
+   * for the same message. Returns false when the new id already exists for
+   * the conversation (unique-index race: another path imported it first).
+   */
+  async restampTranscriptEntryId(
+    messageId: number,
+    transcriptEntryId: string,
+  ): Promise<boolean> {
+    try {
+      const result = this.db
+        .prepare(`UPDATE messages SET transcript_entry_id = ? WHERE message_id = ?`)
+        .run(transcriptEntryId, messageId);
+      return result.changes > 0;
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("UNIQUE constraint failed")) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  /** Return the subset of `entryIds` that already exist for the conversation. */
+  async filterExistingTranscriptEntryIds(
+    conversationId: ConversationId,
+    entryIds: readonly string[],
+  ): Promise<Set<string>> {
+    const existing = new Set<string>();
+    const chunkSize = 400;
+    for (let start = 0; start < entryIds.length; start += chunkSize) {
+      const chunk = entryIds.slice(start, start + chunkSize);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const rows = this.db
+        .prepare(
+          `SELECT transcript_entry_id
+         FROM messages
+         WHERE conversation_id = ? AND transcript_entry_id IN (${placeholders})`,
+        )
+        .all(conversationId, ...chunk) as unknown as Array<{ transcript_entry_id: string }>;
+      for (const row of rows) {
+        existing.add(row.transcript_entry_id);
+      }
+    }
+    return existing;
   }
 
   async countMessagesByIdentity(
