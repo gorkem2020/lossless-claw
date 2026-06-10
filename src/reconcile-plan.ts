@@ -94,3 +94,25 @@ export function selectEntryIdTail(params: {
   }
   return { kind: "tail", anchorIndex, missingIndexes };
 }
+
+export type TranscriptReconcileResult = {
+  blockedByImportCap: boolean;
+  blockedReason?:
+    | "import-cap"
+    | "cross-conversation-raw-id"
+    | "duplicate-transcript-replay"
+    | "ambiguous-session-key-runtime-rollover"
+    | "ambiguous-rollover-rotated-fresh-transcript";
+  importedMessages: number;
+  hasOverlap: boolean;
+  /**
+   * True only when the transcript file was actually read to its frontier and
+   * reconciled into the DB this call (or proven already reconciled). When
+   * true, the transcript is the single persistence source for the turn and
+   * afterTurn must NOT also persist the runtime messages array; flush-lagged
+   * tail messages arrive on the next turn's append-only read, idempotently.
+   * False on every path that allows live runtime persistence because the
+   * transcript was missing, unreadable, or skipped.
+   */
+  transcriptCovered?: boolean;
+};
