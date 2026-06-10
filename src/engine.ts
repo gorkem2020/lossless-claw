@@ -6739,23 +6739,26 @@ export class LcmContextEngine implements ContextEngine {
       source: "reconcileSessionTail",
     });
 
-    if (existingDbCount > 0 && missingTail.length > Math.max(existingDbCount * 0.2, 50)) {
+    // Anchored missing tails are this conversation's own continuation
+    // (lineage proven by the identity anchor), so a tail larger than the
+    // cap must not freeze reconcile forever — that wedges afterTurn
+    // persistence while the backlog keeps growing. Import a capped
+    // oldest-first chunk per pass instead: order is preserved, per-pass
+    // flood exposure stays bounded, and the growing existing count raises
+    // the cap so repeated passes converge. The checkpoint/frontier still
+    // does not advance until the backlog fully drains (blockedByImportCap
+    // stays true on partial passes).
+    const anchoredImportCap = Math.max(Math.floor(existingDbCount * 0.2), 50);
+    const importCapped = existingDbCount > 0 && missingTail.length > anchoredImportCap;
+    const importableTail = importCapped ? missingTail.slice(0, anchoredImportCap) : missingTail;
+    if (importCapped) {
       this.deps.log.warn(
-        `[lcm] reconcileSessionTail: import cap exceeded for ${sessionContext} — would import ${missingTail.length} messages (existing: ${existingDbCount}). Aborting to prevent flood.`,
+        `[lcm] reconcileSessionTail: import cap chunking for ${sessionContext} — importing ${importableTail.length}/${missingTail.length} anchored backlog messages this pass (existing: ${existingDbCount}, cap: ${anchoredImportCap}); remaining backlog continues next pass`,
       );
-      this.deps.log.debug(
-        `[lcm] reconcileSessionTail: blocked for ${sessionContext} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} missingTail=${missingTail.length} existingDbCount=${existingDbCount}`,
-      );
-      return {
-        blockedByImportCap: true,
-        blockedReason: "import-cap",
-        importedMessages: 0,
-        hasOverlap: true,
-      };
     }
 
     let importedMessages = 0;
-    for (const [index, message] of missingTail.entries()) {
+    for (const [index, message] of importableTail.entries()) {
       const result = await this.ingestSingle({
         sessionId,
         sessionKey: params.sessionKey,
@@ -6766,6 +6769,18 @@ export class LcmContextEngine implements ContextEngine {
       if (result.ingested) {
         importedMessages += 1;
       }
+    }
+
+    if (importCapped) {
+      this.deps.log.debug(
+        `[lcm] reconcileSessionTail: capped chunk for ${sessionContext} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} anchorIndex=${anchorIndex} missingTail=${missingTail.length} importedMessages=${importedMessages} existingDbCount=${existingDbCount} cap=${anchoredImportCap}`,
+      );
+      return {
+        blockedByImportCap: true,
+        blockedReason: "import-cap",
+        importedMessages,
+        hasOverlap: true,
+      };
     }
 
     this.deps.log.debug(
@@ -8465,9 +8480,12 @@ export class LcmContextEngine implements ContextEngine {
           );
 
           if (reconcile.blockedByImportCap) {
+            // Anchored capped passes import a bounded chunk of backlog;
+            // report the partial progress while keeping the checkpoint
+            // un-advanced so the next pass continues the drain.
             return {
               bootstrapped: false,
-              importedMessages: 0,
+              importedMessages: reconcile.importedMessages,
               reason:
                 reconcile.blockedReason === "cross-conversation-raw-id"
                   ? "reconcile duplicate raw ids"
