@@ -30,7 +30,7 @@ import {
   resolveDelegatedExpansionGrantId,
   revokeDelegatedExpansionGrantForSession,
 } from "./expansion-auth.js";
-import { describeLogError } from "./lcm-log.js";
+import { describeLogError, formatSessionLabel } from "./lcm-log.js";
 import { describeLcmConfigSource } from "./db/config.js";
 import { RetrievalEngine } from "./retrieval.js";
 import { compileSessionPatterns, matchesSessionPattern } from "./session-patterns.js";
@@ -658,10 +658,7 @@ export class LcmContextEngine implements ContextEngine {
   private async drainDeferredCompactionDebtIfIdle(
     params: DeferredCompactionDebtDrainParams & { queueKey: string },
   ): Promise<void> {
-    const sessionLabel = [
-      `session=${params.sessionId}`,
-      ...(params.sessionKey?.trim() ? [`sessionKey=${params.sessionKey.trim()}`] : []),
-    ].join(" ");
+    const sessionLabel = formatSessionLabel(params.sessionId, params.sessionKey);
     const summarySpendScopeKey = this.compactionGuards.resolveSummarySpendScope({
       kind: "compaction",
       scope: this.resolveSessionQueueKey(params.sessionId, params.sessionKey),
@@ -740,10 +737,7 @@ export class LcmContextEngine implements ContextEngine {
       return null;
     }
 
-    const sessionLabel = [
-      `session=${params.sessionId}`,
-      ...(params.sessionKey?.trim() ? [`sessionKey=${params.sessionKey.trim()}`] : []),
-    ].join(" ");
+    const sessionLabel = formatSessionLabel(params.sessionId, params.sessionKey);
     const summarySpendScopeKey = this.compactionGuards.resolveSummarySpendScope({
       kind: "compaction",
       scope: this.resolveSessionQueueKey(params.sessionId, params.sessionKey),
@@ -897,10 +891,7 @@ export class LcmContextEngine implements ContextEngine {
     tokenBudget: number;
     currentTokenCount?: number;
   }): Promise<{ exhausted: boolean }> {
-    const sessionLabel = [
-      `session=${params.sessionId}`,
-      ...(params.sessionKey?.trim() ? [`sessionKey=${params.sessionKey.trim()}`] : []),
-    ].join(" ");
+    const sessionLabel = formatSessionLabel(params.sessionId, params.sessionKey);
     let drainResult = { exhausted: false };
     await this.withSessionQueue(
       this.resolveSessionQueueKey(params.sessionId, params.sessionKey),
@@ -949,10 +940,7 @@ export class LcmContextEngine implements ContextEngine {
   /** Run the actual compaction body without taking the per-session queue. */
   private async executeCompactionCore(params: CompactionExecutionParams): Promise<CompactResult> {
     const startedAt = Date.now();
-    const sessionLabel = [
-      `session=${params.sessionId}`,
-      ...(params.sessionKey?.trim() ? [`sessionKey=${params.sessionKey.trim()}`] : []),
-    ].join(" ");
+    const sessionLabel = formatSessionLabel(params.sessionId, params.sessionKey);
     const { force = false } = params;
     const legacyParams = asRecord(params.runtimeContext) ?? params.legacyParams;
     const lp = legacyParams ?? {};
@@ -1662,10 +1650,7 @@ export class LcmContextEngine implements ContextEngine {
     }
     this.ensureMigrated();
     const startedAt = Date.now();
-    const sessionLabel = [
-      `session=${params.sessionId}`,
-      ...(params.sessionKey?.trim() ? [`sessionKey=${params.sessionKey.trim()}`] : []),
-    ].join(" ");
+    const sessionLabel = formatSessionLabel(params.sessionId, params.sessionKey);
     const sessionFileStats = await stat(params.sessionFile);
     const sessionFileSize = sessionFileStats.size;
     const sessionFileMtimeMs = Math.trunc(sessionFileStats.mtimeMs);
@@ -2243,10 +2228,7 @@ export class LcmContextEngine implements ContextEngine {
       };
     }
     const startedAt = Date.now();
-    const sessionLabel = [
-      `session=${params.sessionId}`,
-      ...(params.sessionKey?.trim() ? [`sessionKey=${params.sessionKey.trim()}`] : []),
-    ].join(" ");
+    const sessionLabel = formatSessionLabel(params.sessionId, params.sessionKey);
     const result = await this.withSessionQueue(
       this.resolveSessionQueueKey(params.sessionId, params.sessionKey),
       async () => {
@@ -2720,10 +2702,7 @@ export class LcmContextEngine implements ContextEngine {
     }
     this.ensureMigrated();
     const startedAt = Date.now();
-    const sessionLabel = [
-      `session=${params.sessionId}`,
-      ...(params.sessionKey?.trim() ? [`sessionKey=${params.sessionKey.trim()}`] : []),
-    ].join(" ");
+    const sessionLabel = formatSessionLabel(params.sessionId, params.sessionKey);
 
     // Dedup guard: prevent duplicate ingestion when gateway restart replays
     // full history. Run on newMessages BEFORE prepending autoCompactionSummary
@@ -3180,10 +3159,7 @@ export class LcmContextEngine implements ContextEngine {
     try {
       this.ensureMigrated();
       const startedAt = Date.now();
-      const sessionLabel = [
-        `session=${params.sessionId}`,
-        ...(params.sessionKey?.trim() ? [`sessionKey=${params.sessionKey.trim()}`] : []),
-      ].join(" ");
+      const sessionLabel = formatSessionLabel(params.sessionId, params.sessionKey);
 
       if (params.sessionKey?.trim()) {
         await this.withSessionQueue(
