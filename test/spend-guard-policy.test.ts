@@ -20,7 +20,7 @@ import { closeLcmConnection, createLcmDatabaseConnection } from "../src/db/conne
 import { LcmContextEngine } from "../src/engine.js";
 import type { AgentMessage } from "../src/openclaw-bridge.js";
 import type { LcmDependencies } from "../src/types.js";
-import { createTestConfig as createSharedTestConfig } from "./helpers.js";
+import { createTestConfig as createSharedTestConfig, createTestDeps as createSharedTestDeps } from "./helpers.js";
 
 const tempDirs: string[] = [];
 const engines: LcmContextEngine[] = [];
@@ -60,24 +60,11 @@ function parseAgentSessionKey(sessionKey: string): { agentId: string; suffix: st
 type LogMock = { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn>; debug: ReturnType<typeof vi.fn> };
 
 function createTestDeps(config: LcmConfig, log: LogMock): LcmDependencies {
-  return {
-    config,
-    complete: vi.fn(async () => ({
-      content: [{ type: "text", text: "summary output" }],
-    })),
-    callGateway: vi.fn(async () => ({})),
-    resolveModel: vi.fn(() => ({ provider: "anthropic", model: "claude-opus-4-5" })),
-    parseAgentSessionKey,
-    isSubagentSessionKey: (sessionKey: string) => sessionKey.includes(":subagent:"),
-    normalizeAgentId: (id?: string) => (id?.trim() ? id : "main"),
-    buildSubagentSystemPrompt: () => "subagent prompt",
+  return createSharedTestDeps(config, {
     readLatestAssistantReply: () => undefined,
     resolveAgentDir: () => tmpdir(),
-    resolveSessionIdFromSessionKey: async () => undefined,
-    resolveSessionTranscriptFile: async () => undefined,
-    agentLaneSubagent: "subagent",
     log,
-  } as unknown as LcmDependencies;
+  });
 }
 
 function createEngine(configOverrides?: Partial<LcmConfig>): { engine: LcmContextEngine; log: LogMock } {
@@ -120,7 +107,7 @@ function privateEngine(engine: LcmContextEngine): PrivateEngine {
 
 function spendScopeKey(engine: LcmContextEngine, sessionId: string, sessionKey?: string): string {
   const internals = privateEngine(engine);
-  return internals.compactionGuards.resolveSummarySpendScope({
+  return engine.getCompactionGuards().resolveSummarySpendScope({
     kind: "compaction",
     scope: internals.resolveSessionQueueKey(sessionId, sessionKey),
   });
@@ -153,8 +140,8 @@ describe("summary spend guard policy", () => {
 
     const internals = privateEngine(engine);
     const scopeKey = spendScopeKey(engine, sessionId);
-    internals.compactionGuards.openSummarySpendBackoff({ scopeKey, reason: "earlier automatic failure" });
-    expect(internals.compactionGuards.getSummarySpendBackoffUntil(scopeKey)).not.toBeNull();
+    engine.getCompactionGuards().openSummarySpendBackoff({ scopeKey, reason: "earlier automatic failure" });
+    expect(engine.getCompactionGuards().getSummarySpendBackoffUntil(scopeKey)).not.toBeNull();
 
     vi.spyOn(internals.compaction, "evaluate").mockResolvedValue(thresholdEvaluation);
     const compactSpy = vi.spyOn(internals.compaction, "compact").mockResolvedValue({
@@ -173,7 +160,7 @@ describe("summary spend guard policy", () => {
     expect(result.reason).not.toBe("summary spend backoff open");
     expect(result.compacted).toBe(true);
     expect(compactSpy).toHaveBeenCalled();
-    expect(internals.compactionGuards.getSummarySpendBackoffUntil(scopeKey)).toBeNull();
+    expect(engine.getCompactionGuards().getSummarySpendBackoffUntil(scopeKey)).toBeNull();
     expect(log.info).toHaveBeenCalledWith(
       expect.stringContaining("manual request cleared summary spend backoff"),
     );
@@ -209,7 +196,7 @@ describe("summary spend guard policy", () => {
 
     expect(result.ok).toBe(false);
     expect(result.reason).toBe("compacted but still over target");
-    expect(internals.compactionGuards.getSummarySpendBackoffUntil(spendScopeKey(engine, sessionId))).toBeNull();
+    expect(engine.getCompactionGuards().getSummarySpendBackoffUntil(spendScopeKey(engine, sessionId))).toBeNull();
     expect(log.info).toHaveBeenCalledWith(
       expect.stringContaining("spend backoff skipped"),
     );
@@ -236,7 +223,7 @@ describe("summary spend guard policy", () => {
 
     expect(result.ok).toBe(false);
     expect(result.reason).toBe("compacted but still over target");
-    expect(internals.compactionGuards.getSummarySpendBackoffUntil(spendScopeKey(engine, sessionId))).not.toBeNull();
+    expect(engine.getCompactionGuards().getSummarySpendBackoffUntil(spendScopeKey(engine, sessionId))).not.toBeNull();
   });
 
   it("chains threshold sweeps until the target is reached", async () => {
@@ -264,7 +251,7 @@ describe("summary spend guard policy", () => {
     expect(result.reason).toBe("compacted");
     expect(compactSpy).toHaveBeenCalledTimes(3);
     expect(result.result?.details?.rounds).toBe(3);
-    expect(internals.compactionGuards.getSummarySpendBackoffUntil(spendScopeKey(engine, sessionId))).toBeNull();
+    expect(engine.getCompactionGuards().getSummarySpendBackoffUntil(spendScopeKey(engine, sessionId))).toBeNull();
   });
 
 });

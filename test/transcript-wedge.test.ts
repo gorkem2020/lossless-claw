@@ -18,7 +18,7 @@ import { closeLcmConnection, createLcmDatabaseConnection } from "../src/db/conne
 import { LcmContextEngine } from "../src/engine.js";
 import type { AgentMessage } from "../src/openclaw-bridge.js";
 import type { LcmDependencies } from "../src/types.js";
-import { createTestConfig as createSharedTestConfig } from "./helpers.js";
+import { createTestConfig as createSharedTestConfig, createTestDeps as createSharedTestDeps } from "./helpers.js";
 
 const tempDirs: string[] = [];
 const engines: LcmContextEngine[] = [];
@@ -58,24 +58,11 @@ function parseAgentSessionKey(sessionKey: string): { agentId: string; suffix: st
 type LogMock = { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn>; debug: ReturnType<typeof vi.fn> };
 
 function createTestDeps(config: LcmConfig, log: LogMock): LcmDependencies {
-  return {
-    config,
-    complete: vi.fn(async () => ({
-      content: [{ type: "text", text: "summary output" }],
-    })),
-    callGateway: vi.fn(async () => ({})),
-    resolveModel: vi.fn(() => ({ provider: "anthropic", model: "claude-opus-4-5" })),
-    parseAgentSessionKey,
-    isSubagentSessionKey: (sessionKey: string) => sessionKey.includes(":subagent:"),
-    normalizeAgentId: (id?: string) => (id?.trim() ? id : "main"),
-    buildSubagentSystemPrompt: () => "subagent prompt",
+  return createSharedTestDeps(config, {
     readLatestAssistantReply: () => undefined,
     resolveAgentDir: () => tmpdir(),
-    resolveSessionIdFromSessionKey: async () => undefined,
-    resolveSessionTranscriptFile: async () => undefined,
-    agentLaneSubagent: "subagent",
     log,
-  } as unknown as LcmDependencies;
+  });
 }
 
 function createEngine(configOverrides?: Partial<LcmConfig>): { engine: LcmContextEngine; log: LogMock } {
@@ -118,7 +105,7 @@ function privateEngine(engine: LcmContextEngine): PrivateEngine {
 
 function spendScopeKey(engine: LcmContextEngine, sessionId: string, sessionKey?: string): string {
   const internals = privateEngine(engine);
-  return internals.compactionGuards.resolveSummarySpendScope({
+  return engine.getCompactionGuards().resolveSummarySpendScope({
     kind: "compaction",
     scope: internals.resolveSessionQueueKey(sessionId, sessionKey),
   });
@@ -179,7 +166,7 @@ describe("transcript wedge terminal verdict", () => {
     expect(compactSpy).toHaveBeenCalledTimes(1);
     // Terminal verdict: no spend backoff — throttling a non-retryable state
     // only blocks a later manual repair attempt.
-    expect(internals.compactionGuards.getSummarySpendBackoffUntil(spendScopeKey(engine, sessionId))).toBeNull();
+    expect(engine.getCompactionGuards().getSummarySpendBackoffUntil(spendScopeKey(engine, sessionId))).toBeNull();
     expect(log.warn).toHaveBeenCalledWith(
       expect.stringContaining("transcript wedge detected"),
     );

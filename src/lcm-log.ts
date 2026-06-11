@@ -136,3 +136,11 @@ export function createLcmLogger(api: OpenClawPluginApi, config: LcmConfig): LcmL
     { writeDebugToFile },
   );
 }
+
+/** Render the standard `session=… sessionKey=…` log label used across lifecycle methods. */
+export function formatSessionLabel(sessionId: string, sessionKey?: string): string {
+  return [
+    `session=${sessionId}`,
+    ...(sessionKey?.trim() ? [`sessionKey=${sessionKey.trim()}`] : []),
+  ].join(" ");
+}
