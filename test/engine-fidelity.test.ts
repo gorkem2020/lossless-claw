@@ -2498,7 +2498,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
       sessionId,
       message: makeMessage({ role: "user", content: "seed message" }),
     });
-    vi.spyOn(privateEngine.batchDeduplicator, "deduplicateAfterTurnBatch").mockResolvedValue([]);
+    vi.spyOn(engine.getBatchDeduplicator(), "deduplicateAfterTurnBatch").mockResolvedValue([]);
     vi.spyOn(privateEngine.compaction, "evaluate").mockResolvedValue({
       shouldCompact: true,
       reason: "threshold",
@@ -2552,7 +2552,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
       sessionId,
       message: makeMessage({ role: "user", content: "seed message" }),
     });
-    vi.spyOn(privateEngine.batchDeduplicator, "deduplicateAfterTurnBatch").mockResolvedValue([]);
+    vi.spyOn(engine.getBatchDeduplicator(), "deduplicateAfterTurnBatch").mockResolvedValue([]);
     vi.spyOn(privateEngine.compaction, "evaluate").mockResolvedValue({
       shouldCompact: false,
       reason: "below threshold",
@@ -4383,12 +4383,10 @@ describe("LcmContextEngine fidelity and token budget", () => {
     expect(oldCheckpoint!.lastProcessedOffset).toBeGreaterThan(statSync(sessionFile).size);
     const shrinkStats = statSync(sessionFile);
     (
-      engine as unknown as {
-        transcriptReconciler: {
-          afterTurnReconcileFullReadStates: Map<string, { size: number; mtimeMs: number }>;
-        };
+      engine.getTranscriptReconciler() as unknown as {
+        afterTurnReconcileFullReadStates: Map<string, { size: number; mtimeMs: number }>;
       }
-    ).transcriptReconciler.afterTurnReconcileFullReadStates.set(`${sessionKey}\u0000${sessionFile}`, {
+    ).afterTurnReconcileFullReadStates.set(`${sessionKey}\u0000${sessionFile}`, {
       size: shrinkStats.size,
       mtimeMs: Math.trunc(shrinkStats.mtimeMs),
     });

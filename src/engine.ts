@@ -4092,6 +4092,36 @@ export class LcmContextEngine implements ContextEngine {
     return this.sessionRotation.rotateSessionStorageWithBackup(params);
   }
 
+  /** @internal Test seam: typed access to the compaction engine. */
+  getCompactionEngine(): CompactionEngine {
+    return this.compaction;
+  }
+
+  /** @internal Test seam: typed access to the compaction guards service. */
+  getCompactionGuards(): CompactionGuards {
+    return this.compactionGuards;
+  }
+
+  /** @internal Test seam: typed access to the batch deduplicator service. */
+  getBatchDeduplicator(): BatchDeduplicator {
+    return this.batchDeduplicator;
+  }
+
+  /** @internal Test seam: typed access to the transcript reconciler service. */
+  getTranscriptReconciler(): TranscriptReconciler {
+    return this.transcriptReconciler;
+  }
+
+  /** @internal Test seam: typed access to the session rollover detector. */
+  getSessionRolloverDetector(): SessionRolloverDetector {
+    return this.sessionRolloverDetector;
+  }
+
+  /** @internal Test seam: typed access to the large-file interceptor. */
+  getLargeFileInterceptor(): LargeFileInterceptor {
+    return this.largeFileInterceptor;
+  }
+
   getRetrieval(): RetrievalEngine {
     return this.retrieval;
   }

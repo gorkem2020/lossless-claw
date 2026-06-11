@@ -118,7 +118,7 @@ function privateEngine(engine: LcmContextEngine): PrivateEngine {
 
 function spendScopeKey(engine: LcmContextEngine, sessionId: string, sessionKey?: string): string {
   const internals = privateEngine(engine);
-  return internals.compactionGuards.resolveSummarySpendScope({
+  return engine.getCompactionGuards().resolveSummarySpendScope({
     kind: "compaction",
     scope: internals.resolveSessionQueueKey(sessionId, sessionKey),
   });
@@ -179,7 +179,7 @@ describe("transcript wedge terminal verdict", () => {
     expect(compactSpy).toHaveBeenCalledTimes(1);
     // Terminal verdict: no spend backoff — throttling a non-retryable state
     // only blocks a later manual repair attempt.
-    expect(internals.compactionGuards.getSummarySpendBackoffUntil(spendScopeKey(engine, sessionId))).toBeNull();
+    expect(engine.getCompactionGuards().getSummarySpendBackoffUntil(spendScopeKey(engine, sessionId))).toBeNull();
     expect(log.warn).toHaveBeenCalledWith(
       expect.stringContaining("transcript wedge detected"),
     );
