@@ -854,19 +854,12 @@ export class TranscriptReconciler {
       );
     }
 
-    let importedMessages = 0;
-    for (const [index, message] of importableTail.entries()) {
-      const result = await this.host.ingestSingle({
-        sessionId,
-        sessionKey: params.sessionKey,
-        message,
-        skipReplayTimestampFloodGuard:
-          index < missingTailFiltered.replayGuardExemptPrefixLength,
-      });
-      if (result.ingested) {
-        importedMessages += 1;
-      }
-    }
+    const importedMessages = await this.ingestBatch({
+      sessionId,
+      sessionKey: params.sessionKey,
+      messages: importableTail,
+      replayGuardExemptPrefixLength: missingTailFiltered.replayGuardExemptPrefixLength,
+    });
 
     if (importCapped) {
       this.host.deps.log.debug(
@@ -1378,6 +1371,80 @@ export class TranscriptReconciler {
     };
   }
 
+  /**
+   * Ingest a reconciled batch in order, returning how many rows persisted.
+   * Indexes below `replayGuardExemptPrefixLength` skip the replay-timestamp
+   * flood guard (transcript-proven history); pass Infinity to exempt all.
+   */
+  private async ingestBatch(params: {
+    sessionId: string;
+    sessionKey?: string;
+    messages: AgentMessage[];
+    replayGuardExemptPrefixLength: number;
+  }): Promise<number> {
+    let importedMessages = 0;
+    for (const [index, message] of params.messages.entries()) {
+      const result = await this.host.ingestSingle({
+        sessionId: params.sessionId,
+        sessionKey: params.sessionKey,
+        message,
+        skipReplayTimestampFloodGuard: index < params.replayGuardExemptPrefixLength,
+      });
+      if (result.ingested) {
+        importedMessages += 1;
+      }
+    }
+    return importedMessages;
+  }
+
+  /**
+   * Record a successful reconcile import and refresh the bootstrap
+   * checkpoint to the transcript frontier. No-op when nothing imported.
+   */
+  private async recordImportAndRefreshCheckpoint(params: {
+    conversationId: number;
+    sessionFile: string;
+    importedMessages: number;
+  }): Promise<void> {
+    if (params.importedMessages <= 0) {
+      return;
+    }
+    this.host.recordRecentBootstrapImport(
+      params.conversationId,
+      params.importedMessages,
+      "reconciled missing session messages",
+    );
+    await this.refreshBootstrapState({
+      conversationId: params.conversationId,
+      sessionFile: params.sessionFile,
+    });
+  }
+
+  /**
+   * Seed an offset-0 placeholder bootstrap_state row so the next turn can
+   * recover via the incremental path. Used only when no checkpoint exists;
+   * failures are logged and swallowed (the slow path retries later).
+   */
+  private async seedPlaceholderBootstrapState(params: {
+    conversationId: number;
+    sessionFile: string;
+  }): Promise<void> {
+    try {
+      await this.host.summaryStore.upsertConversationBootstrapState({
+        conversationId: params.conversationId,
+        sessionFilePath: params.sessionFile,
+        lastSeenSize: 0,
+        lastSeenMtimeMs: 0,
+        lastProcessedOffset: 0,
+        lastProcessedEntryHash: null,
+      });
+    } catch (seedError) {
+      this.host.deps.log.warn(
+        `[lcm] afterTurn: transcript reconcile slow path failed to seed placeholder bootstrap_state conversation=${params.conversationId} sessionFile=${params.sessionFile} error=${seedError instanceof Error ? seedError.message : String(seedError)}`,
+      );
+    }
+  }
+
   async reconcileTranscriptTailForAfterTurnInSessionQueue(params: {
     sessionId: string;
     sessionKey?: string;
@@ -1445,18 +1512,12 @@ export class TranscriptReconciler {
             );
             return { importedMessages: 0, blockedByImportCap: true, hasOverlap: false };
           }
-          let importedMessages = 0;
-          for (const message of bootstrapMessages) {
-            const result = await this.host.ingestSingle({
-              sessionId: params.sessionId,
-              sessionKey: params.sessionKey,
-              message,
-              skipReplayTimestampFloodGuard: true,
-            });
-            if (result.ingested) {
-              importedMessages += 1;
-            }
-          }
+          const importedMessages = await this.ingestBatch({
+            sessionId: params.sessionId,
+            sessionKey: params.sessionKey,
+            messages: bootstrapMessages,
+            replayGuardExemptPrefixLength: Number.POSITIVE_INFINITY,
+          });
           if (importedMessages > 0) {
             const activeConversation = await this.host.conversationStore.getConversationForSession({
               sessionId: params.sessionId,
@@ -1548,17 +1609,11 @@ export class TranscriptReconciler {
                 historicalMessages: appended.messages,
                 noAnchorImportReason: "placeholder-checkpoint-recovery",
               });
-              if (reconcile.importedMessages > 0) {
-                this.host.recordRecentBootstrapImport(
-                  conversation.conversationId,
-                  reconcile.importedMessages,
-                  "reconciled missing session messages",
-                );
-                await this.refreshBootstrapState({
-                  conversationId: conversation.conversationId,
-                  sessionFile: params.sessionFile,
-                });
-              }
+              await this.recordImportAndRefreshCheckpoint({
+                conversationId: conversation.conversationId,
+                sessionFile: params.sessionFile,
+                importedMessages: reconcile.importedMessages,
+              });
               return {
                 ...reconcile,
                 transcriptCovered: reconcile.hasOverlap || reconcile.importedMessages > 0,
@@ -1585,30 +1640,17 @@ export class TranscriptReconciler {
               source: "afterTurn transcript reconcile append-only",
             });
             if (!appendOnlyOverlapsPersisted) {
-              let importedMessages = 0;
-              for (const [index, message] of replayFilteredMessages.entries()) {
-                const result = await this.host.ingestSingle({
-                  sessionId: params.sessionId,
-                  sessionKey: params.sessionKey,
-                  message,
-                  skipReplayTimestampFloodGuard:
-                    index < replayFiltered.replayGuardExemptPrefixLength,
-                });
-                if (result.ingested) {
-                  importedMessages += 1;
-                }
-              }
-              if (importedMessages > 0) {
-                this.host.recordRecentBootstrapImport(
-                  conversation.conversationId,
-                  importedMessages,
-                  "reconciled missing session messages",
-                );
-                await this.refreshBootstrapState({
-                  conversationId: conversation.conversationId,
-                  sessionFile: params.sessionFile,
-                });
-              }
+              const importedMessages = await this.ingestBatch({
+                sessionId: params.sessionId,
+                sessionKey: params.sessionKey,
+                messages: replayFilteredMessages,
+                replayGuardExemptPrefixLength: replayFiltered.replayGuardExemptPrefixLength,
+              });
+              await this.recordImportAndRefreshCheckpoint({
+                conversationId: conversation.conversationId,
+                sessionFile: params.sessionFile,
+                importedMessages,
+              });
               return {
                 importedMessages,
                 blockedByImportCap: false,
@@ -1675,20 +1717,10 @@ export class TranscriptReconciler {
 
         if (isMissingFileError(sessionFileStatError)) {
           if (!checkpoint) {
-            try {
-              await this.host.summaryStore.upsertConversationBootstrapState({
-                conversationId: conversation.conversationId,
-                sessionFilePath: params.sessionFile,
-                lastSeenSize: 0,
-                lastSeenMtimeMs: 0,
-                lastProcessedOffset: 0,
-                lastProcessedEntryHash: null,
-              });
-            } catch (seedError) {
-              this.host.deps.log.warn(
-                `[lcm] afterTurn: transcript reconcile slow path failed to seed placeholder bootstrap_state conversation=${conversation.conversationId} sessionFile=${params.sessionFile} error=${seedError instanceof Error ? seedError.message : String(seedError)}`,
-              );
-            }
+            await this.seedPlaceholderBootstrapState({
+              conversationId: conversation.conversationId,
+              sessionFile: params.sessionFile,
+            });
             this.host.deps.log.warn(
               `[lcm] afterTurn: session file missing; skipping transcript reconcile full reread; could not stat/read transcript; allowing live afterTurn persistence and seeding placeholder bootstrap_state at offset=0 to unblock next-turn recovery conversation=${conversation.conversationId} reason=${reason} sessionFile=${params.sessionFile}`,
             );
@@ -1786,20 +1818,10 @@ export class TranscriptReconciler {
             // replay every message from offset=0, duplicating rows in the
             // messages table (identity_hash is not a uniqueness guard).
             if (!checkpoint) {
-              try {
-                await this.host.summaryStore.upsertConversationBootstrapState({
-                  conversationId: conversation.conversationId,
-                  sessionFilePath: params.sessionFile,
-                  lastSeenSize: 0,
-                  lastSeenMtimeMs: 0,
-                  lastProcessedOffset: 0,
-                  lastProcessedEntryHash: null,
-                });
-              } catch (seedError) {
-                this.host.deps.log.warn(
-                  `[lcm] afterTurn: transcript reconcile slow path failed to seed placeholder bootstrap_state conversation=${conversation.conversationId} sessionFile=${params.sessionFile} error=${seedError instanceof Error ? seedError.message : String(seedError)}`,
-                );
-              }
+              await this.seedPlaceholderBootstrapState({
+                conversationId: conversation.conversationId,
+                sessionFile: params.sessionFile,
+              });
               this.host.deps.log.warn(
                 `[lcm] afterTurn: transcript reconcile slow path could not stat/read transcript; allowing live afterTurn persistence and seeding placeholder bootstrap_state at offset=0 to unblock next-turn recovery conversation=${conversation.conversationId} sessionFile=${params.sessionFile}`,
               );
