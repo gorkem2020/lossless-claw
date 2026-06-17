@@ -37,13 +37,11 @@ import {
   CompactionMaintenanceStore,
   type ConversationCompactionMaintenanceRecord,
 } from "../store/compaction-maintenance-store.js";
-import { CompactionTelemetryStore } from "../store/compaction-telemetry-store.js";
 import { FocusBriefStore, hashFocusSourceContext } from "../store/focus-brief-store.js";
 
 const VISIBLE_COMMAND = "/lossless";
 const HIDDEN_ALIAS = "/lcm";
 const ROTATE_DATABASE_LOCK_TIMEOUT_MS = 30_000;
-const DOCTOR_APPLY_LARGE_MESSAGE_THRESHOLD = 1_000;
 const DOCTOR_APPLY_LARGE_TARGET_THRESHOLD = 25;
 const DOCTOR_APPLY_BUDGET_PRESSURE_RATIO = 0.75;
 
@@ -82,6 +80,10 @@ type CurrentConversationResolution =
     };
 type DoctorApplyOptions = {
   confirmOffline: boolean;
+};
+type DoctorApplyRepairMetrics = {
+  repairInputTokenCount: number;
+  repairTargetSourceTokenCount: number;
 };
 type RolloverSplitApplyOptions = {
   confirm: boolean;
@@ -546,13 +548,6 @@ async function getConversationCompactionMaintenanceByConversationId(
   );
 }
 
-async function getConversationCompactionTelemetryByConversationId(
-  db: DatabaseSync,
-  conversationId: number,
-) {
-  return await new CompactionTelemetryStore(db).getConversationCompactionTelemetry(conversationId);
-}
-
 async function resolveCurrentConversation(params: {
   ctx: PluginCommandContext;
   db: DatabaseSync;
@@ -633,45 +628,119 @@ async function resolveRuntimeSessionId(params: {
   return normalizeIdentity(params.current.stats.sessionId);
 }
 
+function normalizePositiveInteger(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : null;
+}
+
 function resolveLifecycleCompactionTokenBudget(config: LcmConfig): number {
-  return config.maxAssemblyTokenBudget && config.maxAssemblyTokenBudget > 0
-    ? Math.floor(config.maxAssemblyTokenBudget)
-    : 128_000;
+  return normalizePositiveInteger(config.maxAssemblyTokenBudget) ?? 128_000;
+}
+
+function resolveStatusAssemblyTokenBudget(
+  config: LcmConfig,
+  maintenance: ConversationCompactionMaintenanceRecord | null,
+): number {
+  return (
+    normalizePositiveInteger(config.maxAssemblyTokenBudget)
+    ?? normalizePositiveInteger(maintenance?.tokenBudget)
+    ?? 128_000
+  );
+}
+
+function buildTargetSummaryValuesSql(summaryIds: string[]): string {
+  return summaryIds.map(() => "(?)").join(", ");
+}
+
+function loadDoctorApplyRepairMetrics(
+  db: DatabaseSync,
+  doctor: DoctorSummaryStats,
+): DoctorApplyRepairMetrics {
+  const summaryIds = [...new Set(doctor.candidates.map((candidate) => candidate.summaryId))];
+  if (summaryIds.length === 0) {
+    return {
+      repairInputTokenCount: 0,
+      repairTargetSourceTokenCount: 0,
+    };
+  }
+
+  const targetValuesSql = buildTargetSummaryValuesSql(summaryIds);
+
+  // Repair input mirrors lcm-doctor-apply: leaf targets read linked messages,
+  // while condensed targets read their immediate child summaries.
+  const repairInputRow = db
+    .prepare(
+      `WITH target_summaries(summary_id) AS (VALUES ${targetValuesSql})
+       SELECT COALESCE(SUM(input_tokens), 0) AS token_count
+       FROM (
+         SELECT t.summary_id, COALESCE(SUM(m.token_count), 0) AS input_tokens
+         FROM target_summaries t
+         JOIN summaries target ON target.summary_id = t.summary_id
+         JOIN summary_messages sm ON sm.summary_id = t.summary_id
+         JOIN messages m ON m.message_id = sm.message_id
+         WHERE target.kind = 'leaf' OR COALESCE(target.depth, 0) = 0
+         GROUP BY t.summary_id
+         UNION ALL
+         SELECT t.summary_id, COALESCE(SUM(child.token_count), 0) AS input_tokens
+         FROM target_summaries t
+         JOIN summaries target ON target.summary_id = t.summary_id
+         JOIN summary_parents sp ON sp.summary_id = t.summary_id
+         JOIN summaries child ON child.summary_id = sp.parent_summary_id
+         WHERE NOT (target.kind = 'leaf' OR COALESCE(target.depth, 0) = 0)
+         GROUP BY t.summary_id
+       ) repair_inputs`,
+    )
+    .get(...summaryIds) as { token_count: number | null } | undefined;
+
+  // Source coverage expands each target's summary tree to linked raw messages
+  // and deduplicates messages shared by multiple target roots.
+  const sourceCoverageRow = db
+    .prepare(
+      `WITH RECURSIVE
+       target_summaries(summary_id) AS (VALUES ${targetValuesSql}),
+       target_tree(summary_id) AS (
+         SELECT summary_id FROM target_summaries
+         UNION
+         SELECT sp.parent_summary_id
+         FROM target_tree tree
+         JOIN summary_parents sp ON sp.summary_id = tree.summary_id
+       ),
+       covered_messages AS (
+         SELECT DISTINCT sm.message_id
+         FROM target_tree tree
+         JOIN summary_messages sm ON sm.summary_id = tree.summary_id
+       )
+       SELECT COALESCE(SUM(m.token_count), 0) AS token_count
+       FROM covered_messages covered
+       JOIN messages m ON m.message_id = covered.message_id`,
+    )
+    .get(...summaryIds) as { token_count: number | null } | undefined;
+
+  return {
+    repairInputTokenCount: Math.max(0, Math.floor(repairInputRow?.token_count ?? 0)),
+    repairTargetSourceTokenCount: Math.max(0, Math.floor(sourceCoverageRow?.token_count ?? 0)),
+  };
 }
 
 function buildDoctorApplySafetyPreflight(params: {
   config: LcmConfig;
-  stats: LcmConversationStatusStats;
   doctor: DoctorSummaryStats;
+  repairMetrics: DoctorApplyRepairMetrics;
   maintenance: ConversationCompactionMaintenanceRecord | null;
 }): { blocked: boolean; reasons: string[]; tokenBudget: number; tokenThreshold: number } {
   const tokenBudget = resolveLifecycleCompactionTokenBudget(params.config);
   const tokenThreshold = Math.floor(tokenBudget * DOCTOR_APPLY_BUDGET_PRESSURE_RATIO);
   const reasons: string[] = [];
-  const maintenanceObservedTokens = Math.max(
-    params.maintenance?.currentTokenCount ?? 0,
-    params.maintenance?.projectedTokenCount ?? 0,
-  );
-  const observedTokens = Math.max(
-    params.stats.contextTokenCount,
-    params.stats.summarizedSourceTokens,
-    params.stats.compressedTokenCount,
-    maintenanceObservedTokens,
-  );
 
   if (params.doctor.total > DOCTOR_APPLY_LARGE_TARGET_THRESHOLD) {
     reasons.push(
       `doctor target count ${formatNumber(params.doctor.total)} exceeds safe inline limit ${formatNumber(DOCTOR_APPLY_LARGE_TARGET_THRESHOLD)}`,
     );
   }
-  if (params.stats.messageCount > DOCTOR_APPLY_LARGE_MESSAGE_THRESHOLD) {
+  if (params.repairMetrics.repairInputTokenCount > tokenThreshold) {
     reasons.push(
-      `message count ${formatNumber(params.stats.messageCount)} exceeds safe inline limit ${formatNumber(DOCTOR_APPLY_LARGE_MESSAGE_THRESHOLD)}`,
-    );
-  }
-  if (observedTokens > tokenThreshold) {
-    reasons.push(
-      `observed token count ${formatNumber(observedTokens)} exceeds ${formatNumber(Math.round(DOCTOR_APPLY_BUDGET_PRESSURE_RATIO * 100))}% of repair budget ${formatNumber(tokenBudget)}`,
+      `repair input token count ${formatNumber(params.repairMetrics.repairInputTokenCount)} exceeds ${formatNumber(Math.round(DOCTOR_APPLY_BUDGET_PRESSURE_RATIO * 100))}% of repair budget ${formatNumber(tokenBudget)}`,
     );
   }
   if (params.maintenance?.pending) {
@@ -696,17 +765,16 @@ function buildLcmHealthSummary(params: {
   stats: LcmConversationStatusStats;
   maintenance: ConversationCompactionMaintenanceRecord | null;
 }): { state: "healthy" | "warning" | "degraded"; reasons: string[] } {
-  const tokenBudget = resolveLifecycleCompactionTokenBudget(params.config);
+  const tokenBudget = resolveStatusAssemblyTokenBudget(
+    params.config,
+    params.maintenance,
+  );
   const warningThreshold = Math.floor(tokenBudget * DOCTOR_APPLY_BUDGET_PRESSURE_RATIO);
   const activeMaintenance = params.maintenance?.pending || params.maintenance?.running;
   const assemblyObservedTokens = Math.max(
     params.stats.contextTokenCount,
     activeMaintenance ? params.maintenance?.currentTokenCount ?? 0 : 0,
     activeMaintenance ? params.maintenance?.projectedTokenCount ?? 0 : 0,
-  );
-  const repairSurfaceTokens = Math.max(
-    params.stats.summarizedSourceTokens,
-    params.stats.compressedTokenCount,
   );
   const degradedReasons: string[] = [];
   const warningReasons: string[] = [];
@@ -728,11 +796,6 @@ function buildLcmHealthSummary(params: {
       `observed token count ${formatNumber(assemblyObservedTokens)} exceeds ${formatNumber(Math.round(DOCTOR_APPLY_BUDGET_PRESSURE_RATIO * 100))}% of assembly budget ${formatNumber(tokenBudget)}`,
     );
   }
-  if (repairSurfaceTokens > warningThreshold) {
-    warningReasons.push(
-      `repair source token count ${formatNumber(repairSurfaceTokens)} exceeds ${formatNumber(Math.round(DOCTOR_APPLY_BUDGET_PRESSURE_RATIO * 100))}% of assembly budget ${formatNumber(tokenBudget)}`,
-    );
-  }
   if (params.maintenance?.lastFailureSummary) {
     warningReasons.push(`last maintenance failure: ${params.maintenance.lastFailureSummary}`);
   }
@@ -744,6 +807,57 @@ function buildLcmHealthSummary(params: {
     return { state: "warning", reasons: warningReasons };
   }
   return { state: "healthy", reasons: [] };
+}
+
+function getMaintenanceState(
+  maintenance: ConversationCompactionMaintenanceRecord | null,
+): "pending" | "running" | "idle" {
+  if (maintenance?.pending) return "pending";
+  if (maintenance?.running) return "running";
+  return "idle";
+}
+
+// Keep default status focused on operator action: active work, failure state, or
+// the last successful budget. Detailed token-pressure and cache telemetry stay in
+// logs and maintenance internals instead of the chat command surface.
+function buildMaintenanceSummaryLines(params: {
+  maintenance: ConversationCompactionMaintenanceRecord | null;
+  formatTime: (value: Date | null) => string;
+}): string[] {
+  const maintenance = params.maintenance;
+  const state = getMaintenanceState(maintenance);
+  const lines = [buildStatLine("state", state)];
+  if (!maintenance) {
+    return lines;
+  }
+
+  const active = state === "pending" || state === "running";
+  const failed = Boolean(maintenance.lastFailureSummary);
+  if (active || failed) {
+    if (maintenance.reason) lines.push(buildStatLine("reason", maintenance.reason));
+    if (active && maintenance.requestedAt) {
+      lines.push(buildStatLine("requested at", params.formatTime(maintenance.requestedAt)));
+    }
+    if (maintenance.lastStartedAt) {
+      lines.push(buildStatLine("last started", params.formatTime(maintenance.lastStartedAt)));
+    }
+    if (maintenance.lastFinishedAt && state !== "running") {
+      lines.push(buildStatLine("last finished", params.formatTime(maintenance.lastFinishedAt)));
+    }
+    if (maintenance.lastFailureSummary) {
+      lines.push(buildStatLine("last failure", maintenance.lastFailureSummary));
+    }
+    if (maintenance.nextAttemptAfter) {
+      lines.push(buildStatLine("next retry", params.formatTime(maintenance.nextAttemptAfter)));
+    }
+  } else if (maintenance.lastFinishedAt) {
+    lines.push(buildStatLine("last finished", params.formatTime(maintenance.lastFinishedAt)));
+  }
+
+  if (maintenance.tokenBudget != null) {
+    lines.push(buildStatLine("budget", formatNumber(maintenance.tokenBudget)));
+  }
+  return lines;
 }
 
 // Run the cache-aware focus lifecycle sweep. Focus and unfocus both mutate the
@@ -1000,10 +1114,6 @@ async function buildStatusText(params: {
       params.db,
       current.stats.conversationId,
     );
-    const telemetry = await getConversationCompactionTelemetryByConversationId(
-      params.db,
-      current.stats.conversationId,
-    );
     const lcmHealth = buildLcmHealthSummary({
       config: params.config,
       stats: current.stats,
@@ -1030,7 +1140,7 @@ async function buildStatusText(params: {
         ),
         buildStatLine("stored summary tokens", formatNumber(current.stats.storedSummaryTokens)),
         buildStatLine("summarized source tokens", formatNumber(current.stats.summarizedSourceTokens)),
-        buildStatLine("tokens in context", formatNumber(current.stats.contextTokenCount)),
+        buildStatLine("LCM frontier tokens", formatNumber(current.stats.contextTokenCount)),
         buildStatLine(
           "compression ratio",
           formatCompressionRatio(current.stats.contextTokenCount, current.stats.compressedTokenCount),
@@ -1049,42 +1159,10 @@ async function buildStatusText(params: {
     lines.push("", buildSection("🎯 Focus", focusLines));
     lines.push(
       "",
-      buildSection("🛠️ Maintenance", [
-        buildStatLine(
-          "state",
-          maintenance?.pending
-            ? "pending"
-            : maintenance?.running
-              ? "running"
-              : "idle",
-        ),
-        buildStatLine("requested at", formatMaintenanceTime(maintenance?.requestedAt ?? null)),
-        buildStatLine("reason", maintenance?.reason ?? "none"),
-        buildStatLine("last started", formatMaintenanceTime(maintenance?.lastStartedAt ?? null)),
-        buildStatLine("last finished", formatMaintenanceTime(maintenance?.lastFinishedAt ?? null)),
-        buildStatLine("last failure", maintenance?.lastFailureSummary ?? "none"),
-        buildStatLine(
-          "requested token budget",
-          maintenance?.tokenBudget != null ? formatNumber(maintenance.tokenBudget) : "unknown",
-        ),
-        buildStatLine(
-          "observed token count",
-          maintenance?.currentTokenCount != null ? formatNumber(maintenance.currentTokenCount) : "unknown",
-        ),
-        buildStatLine(
-          "projected token count",
-          maintenance?.projectedTokenCount != null ? formatNumber(maintenance.projectedTokenCount) : "unknown",
-        ),
-        buildStatLine(
-          "raw tokens outside tail",
-          maintenance?.rawTokensOutsideTail != null ? formatNumber(maintenance.rawTokensOutsideTail) : "unknown",
-        ),
-        buildStatLine("last api call", formatMaintenanceTime(telemetry?.lastApiCallAt ?? null)),
-        buildStatLine("last cache touch", formatMaintenanceTime(telemetry?.lastCacheTouchAt ?? null)),
-        buildStatLine("cache retention", telemetry?.retention ?? "unknown"),
-        buildStatLine("cache state", telemetry?.cacheState ?? "unknown"),
-        buildStatLine("provider/model", [telemetry?.provider, telemetry?.model].filter(Boolean).join(" / ") || "unknown"),
-      ]),
+      buildSection(
+        "🛠️ Maintenance",
+        buildMaintenanceSummaryLines({ maintenance, formatTime: formatMaintenanceTime }),
+      ),
     );
   } else {
     lines.push(
@@ -2481,10 +2559,18 @@ async function buildDoctorApplyText(params: {
     params.db,
     current.stats.conversationId,
   );
+  const skipRepairMetrics =
+    params.options?.confirmOffline !== true && stats.total > DOCTOR_APPLY_LARGE_TARGET_THRESHOLD;
+  const repairMetrics = skipRepairMetrics
+    ? null
+    : loadDoctorApplyRepairMetrics(params.db, stats);
   const preflight = buildDoctorApplySafetyPreflight({
     config: params.config,
-    stats: current.stats,
     doctor: stats,
+    repairMetrics: repairMetrics ?? {
+      repairInputTokenCount: 0,
+      repairTargetSourceTokenCount: 0,
+    },
     maintenance,
   });
   if (preflight.blocked && params.options?.confirmOffline !== true) {
@@ -2505,9 +2591,17 @@ async function buildDoctorApplyText(params: {
       buildSection("🧯 Safety preflight", [
         buildStatLine("status", "blocked"),
         buildStatLine("mode", "read-only; no summary rewrites ran"),
-        buildStatLine("messages", formatNumber(current.stats.messageCount)),
-        buildStatLine("tokens in context", formatNumber(current.stats.contextTokenCount)),
-        buildStatLine("detected summaries", formatNumber(stats.total)),
+        buildStatLine("LCM frontier tokens", formatNumber(current.stats.contextTokenCount)),
+        buildStatLine("repair targets", formatNumber(stats.total)),
+        ...(repairMetrics
+          ? [
+              buildStatLine("repair input tokens", formatNumber(repairMetrics.repairInputTokenCount)),
+              buildStatLine(
+                "repair target source tokens",
+                formatNumber(repairMetrics.repairTargetSourceTokenCount),
+              ),
+            ]
+          : []),
         buildStatLine("token threshold", formatNumber(preflight.tokenThreshold)),
         ...preflight.reasons.map((reason) => buildStatLine("reason", reason)),
       ]),
@@ -2585,7 +2679,7 @@ async function buildDoctorApplyText(params: {
       ...(params.options?.confirmOffline === true
         ? [buildStatLine("safety override", "confirm-offline")]
         : []),
-      buildStatLine("detected summaries", formatNumber(stats.total)),
+      buildStatLine("repair targets", formatNumber(stats.total)),
       buildStatLine("old-marker summaries", formatNumber(stats.old)),
       buildStatLine("truncated-marker summaries", formatNumber(stats.truncated)),
       buildStatLine("fallback-marker summaries", formatNumber(stats.fallback)),
