@@ -1,5 +1,11 @@
 # @martian-engineering/lossless-claw
 
+## 0.13.2
+
+### Patch Changes
+
+- [#911](https://github.com/Martian-Engineering/lossless-claw/pull/911) [`e13a1ff`](https://github.com/Martian-Engineering/lossless-claw/commit/e13a1ff7eb22803841013311cdcda0dbf8cffb9c) Thanks [@100yenadmin](https://github.com/100yenadmin)! - Warn from `/lossless` status and doctor when OpenClaw metadata shows lossless-claw installed from an exact npm version, and document `@latest` as the routine install/update track.
+
 ## 0.13.1
 
 ### Patch Changes
