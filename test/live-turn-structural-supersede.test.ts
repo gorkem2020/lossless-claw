@@ -253,6 +253,52 @@ describe("appendUncoveredVolatileLiveInputsWithinBudget fail-closed: distinct tu
   });
 });
 
+describe("appendUncoveredVolatileLiveInputsWithinBudget bounds supersede to the current tail", () => {
+  it("preserves an earlier user turn whose body equals the current turn body", () => {
+    // Regression for PR #926 review: the supersede must replace only the current
+    // turn's bare face(s) — the trailing contiguous user run — not every assembled
+    // row that happens to share the body. An earlier, genuinely distinct user turn
+    // ("yes") separated from the current turn by an assistant reply must survive
+    // even though the current turn body is also "yes". The store double-write that
+    // this collapses always lands at the inbound tail (no assistant reply after it
+    // yet), so a same-body row BEHIND an assistant message is a different turn.
+    const REPEAT = "yes";
+    const assembledMessages: AgentMessage[] = [
+      // Earlier, genuinely distinct user turn with the SAME body.
+      { role: "user", content: REPEAT },
+      { role: "assistant", content: "ok, proceeding" },
+      // Bare current turn reconstructed from the store.
+      { role: "user", content: REPEAT },
+      // [timestamp] body DUPLICATE of the same current turn.
+      { role: "user", content: webchatTimestampedBody(REPEAT) },
+    ] as AgentMessage[];
+    const liveMessages: AgentMessage[] = [
+      // Decorated live copy of the current turn.
+      { role: "user", content: decoratedWebchat(REPEAT) },
+    ] as AgentMessage[];
+
+    const result = appendUncoveredVolatileLiveInputsWithinBudget({
+      assembledMessages,
+      assembledEstimatedTokens: 10,
+      liveMessages,
+      tokenBudget: 1_000_000,
+    });
+
+    const userTurns = result.messages.filter(
+      (message) => (message as { role: string }).role === "user",
+    );
+    // Two user turns survive: the earlier "yes" + the single decorated current turn.
+    expect(userTurns).toHaveLength(2);
+    // The earlier distinct turn (a plain bare "yes" BEFORE the assistant) is preserved.
+    expect((userTurns[0] as { content: string }).content).toBe(REPEAT);
+    // Only the current-turn faces collapsed: exactly one of them was evicted-or-
+    // appended away, never the historical row.
+    const current = userTurns[userTurns.length - 1] as { content: string };
+    expect(current.content).toContain("<active_memory_plugin>");
+    expect(current.content).toContain(REPEAT);
+  });
+});
+
 describe("engine.assemble preserves webchat decoration + memory (no-preamble, memory-first path)", () => {
   it("emits exactly one decorated user message, collapsing the bare + [timestamp] duplication", async () => {
     const engine = createEngine();
@@ -296,5 +342,56 @@ describe("engine.assemble preserves webchat decoration + memory (no-preamble, me
     expect(bodyTurns).toHaveLength(1);
     // And the one copy that survives is the decorated one.
     expect(bodyTurns[0]).toContain("<active_memory_plugin>");
+  });
+
+  it("preserves an earlier same-body user turn through the real ingest->assemble path", async () => {
+    // Integration guard for PR #926 review: drive the "earlier turn repeats the
+    // current body" case through the real store reconstruction, not a synthetic
+    // array. An earlier "yes" (separated by an assistant reply) must survive a
+    // current "yes", with only the current turn carrying the live decoration.
+    const engine = createEngine();
+    const sessionId = "session-webchat-repeated-body-supersede";
+    const REPEAT = "yes";
+
+    await engine.ingest({
+      sessionId,
+      message: { role: "user", content: REPEAT } as AgentMessage,
+    });
+    await engine.ingest({
+      sessionId,
+      message: { role: "assistant", content: "ok, proceeding" } as AgentMessage,
+    });
+    // Current turn persisted BARE, SAME body as the earlier turn.
+    await engine.ingest({
+      sessionId,
+      message: { role: "user", content: REPEAT } as AgentMessage,
+    });
+
+    const liveMessages: AgentMessage[] = [
+      { role: "user", content: REPEAT },
+      { role: "assistant", content: "ok, proceeding" },
+      { role: "user", content: decoratedWebchat(REPEAT) },
+    ] as AgentMessage[];
+
+    const result = await engine.assemble({
+      sessionId,
+      messages: liveMessages,
+      tokenBudget: 1_000_000,
+    });
+
+    const userContents = result.messages
+      .filter((message) => (message as { role: string }).role === "user")
+      .map((message) =>
+        typeof message.content === "string" ? message.content : JSON.stringify(message.content),
+      );
+    const bodyTurns = userContents.filter((content) => content.includes(REPEAT));
+    // BOTH "yes" turns survive: the earlier bare one + the current decorated one.
+    expect(bodyTurns).toHaveLength(2);
+    // Exactly one carries the live decoration (the current turn).
+    expect(bodyTurns.filter((content) => content.includes("<active_memory_plugin>"))).toHaveLength(
+      1,
+    );
+    // The earlier turn survives as a plain bare body.
+    expect(bodyTurns.some((content) => content === REPEAT)).toBe(true);
   });
 });

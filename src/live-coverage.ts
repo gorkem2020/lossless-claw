@@ -609,17 +609,24 @@ function resolveStructuralCurrentTurnLiveIndex(params: {
 }
 
 /**
- * Resolve EVERY assembled bare user row superseded by the live current turn.
- * The current turn is the structural last-user live message; every bare
- * assembled row it structurally contains (a plain `body` row, a `[timestamp]
+ * Resolve the assembled bare user rows superseded by the live current turn,
+ * bounded to the current turn's TAIL. The current turn is the structural
+ * last-user live message; its bare faces (a plain `body` row, a `[timestamp]
  * body` row, or a Telegram/Slack decorated copy whose body is the same trailing
  * segment) must be collapsed onto the single live copy, or the duplication the
  * store created survives into the model prompt.
  *
+ * Bounded to the trailing contiguous user run: only rows in the inbound tail
+ * (after the last assistant/tool message) are eligible. The store double-write
+ * always lands there because the current turn has no assistant reply yet, so the
+ * bound captures every face on every channel while a same-body row BEHIND an
+ * assistant message is recognized as a genuinely earlier turn and preserved
+ * (PR #926 review: an earlier "yes" must survive a current "yes").
+ *
  * Plugin-agnostic: matched solely via liveContentContainsBareBody + the
- * strictly-shorter structural guard. A live last-user message that contains no
- * bare assembled body supersedes nothing (fail-closed), so distinct turns are
- * never collapsed.
+ * strictly-shorter structural guard within the tail. A live last-user message
+ * that contains no bare assembled body supersedes nothing (fail-closed), so
+ * distinct turns are never collapsed.
  *
  * This deliberately ignores fresh-tail / tool-pair protection: superseding a
  * bare current-turn row by its richer live copy is a same-turn identity
@@ -641,6 +648,16 @@ export function resolveStructuralCurrentTurnSupersededIndexes(params: {
     return superseded;
   }
   const liveStored = toStoredMessage(params.liveMessages[currentTurnLiveIndex] as AgentMessage);
+  // Bound the supersede to the current turn's TAIL: the trailing contiguous run
+  // of assembled USER rows. The store double-write this collapses always lands at
+  // the inbound tail — the current turn has no assistant reply after it yet — so
+  // every bare/timestamped face of the current turn lives in this run. We stop at
+  // the first non-user (assistant/tool) message, which is the real turn boundary:
+  // a same-body user row BEHIND it is a genuinely earlier turn and must be
+  // preserved, not collapsed by content match (PR #926 review). We do NOT stop at
+  // a non-matching USER row, because the covered path keeps the exact-equal
+  // decorated survivor at the tail end (a non-match on equal content) and the bare
+  // duplicates to collapse sit behind it within the same inbound run.
   for (
     let assembledIndex = params.assembledMessages.length - 1;
     assembledIndex >= 0;
@@ -648,7 +665,8 @@ export function resolveStructuralCurrentTurnSupersededIndexes(params: {
   ) {
     const assembledStored = toStoredMessage(params.assembledMessages[assembledIndex] as AgentMessage);
     if (assembledStored.role !== "user") {
-      continue;
+      // End of the trailing user run — never reach back into prior turns.
+      break;
     }
     if (
       assembledRowIsStructuralBareCurrentTurn({
@@ -657,9 +675,11 @@ export function resolveStructuralCurrentTurnSupersededIndexes(params: {
       })
     ) {
       superseded.add(assembledIndex);
-      // Do NOT break: one live current turn may supersede MULTIPLE bare rows
-      // (the plain `body` copy AND the `[timestamp] body` copy).
+      // Do NOT break on a match: one live current turn may supersede MULTIPLE bare
+      // rows in this tail (the plain `body` copy AND the `[timestamp] body` copy).
     }
+    // A non-matching user row (e.g. the exact-equal decorated survivor) is skipped
+    // but does NOT end the run.
   }
   return superseded;
 }
