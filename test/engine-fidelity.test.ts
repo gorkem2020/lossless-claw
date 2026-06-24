@@ -2230,7 +2230,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
     expect(executeSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("poor-reduction spend backoff blocks custom summarizers in the same compaction scope", async () => {
+  it("force compaction clears poor-reduction spend backoff for custom summarizers in the same scope", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-05-31T12:35:00.000Z"));
     try {
@@ -2270,6 +2270,11 @@ describe("LcmContextEngine fidelity and token budget", () => {
       expect(first.reason).toBe("could not reach target");
       expect(summarize).toHaveBeenCalledTimes(1);
 
+      // force:true clears the spend backoff before compaction, so a
+      // second force-driven call proceeds instead of being blocked.
+      // The backoff is still set by the first call's failure, but force
+      // overrides it (overflow recovery and other forced paths must not
+      // be blocked by a spend backoff).
       const second = await engine.compact({
         sessionId,
         sessionFile: createSessionFilePath("custom-summarizer-poor-reduction-backoff-retry"),
@@ -2278,8 +2283,8 @@ describe("LcmContextEngine fidelity and token budget", () => {
         force: true,
         legacyParams: { summarize },
       });
-      expect(second.reason).toBe("summary spend backoff open");
-      expect(summarize).toHaveBeenCalledTimes(1);
+      expect(second.reason).toBe("could not reach target");
+      expect(summarize).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }
