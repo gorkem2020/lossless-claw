@@ -191,7 +191,7 @@ describe("LcmContextEngine afterTurn", () => {
   it("afterTurn keeps a 24+ char user message that only collides as a substring of the summary narrative (F6)", async () => {
     // PR-6 #566 / F6: bare summary.includes(content) was too loose. A medium-
     // length user instruction that coincidentally appears inside a long
-    // narrative summary must NOT be silently dropped — only anchored or
+    // narrative summary must NOT be silently dropped; only anchored or
     // quoted matches count as covered.
     const engine = createEngine();
     const sessionId = "after-turn-summary-substring-collision";
@@ -228,7 +228,7 @@ describe("LcmContextEngine afterTurn", () => {
 
   it("afterTurn drops a user message when the summary ends with that exact content (F6 anchored)", async () => {
     // Anchored truth case: content appears at the end of the summary's
-    // normalized text — that's a real coverage signal, drop the dup.
+    // normalized text, that's a real coverage signal, drop the dup.
     const engine = createEngine();
     const sessionId = "after-turn-summary-suffix-anchored";
     const repeatedInstruction = "kick off the workers and check back in an hour";
@@ -1435,7 +1435,7 @@ describe("LcmContextEngine afterTurn", () => {
   it("afterTurn fails closed when the transcript reconcile throws: no batch persistence, no checkpoint advance", async () => {
     // The catch handler used to leave the initialized in-sync default in place,
     // so a thrown reconcile persisted the live batch AND refreshed the
-    // checkpoint to EOF — silently advancing past transcript history that was
+    // checkpoint to EOF, silently advancing past transcript history that was
     // never reconciled.
     const warnLog = vi.fn();
     const engine = createEngineWithDeps(
@@ -1561,7 +1561,7 @@ describe("LcmContextEngine afterTurn", () => {
       .getConversationStore()
       .getMessages(conversation!.conversationId);
     const contents = messages.map((m) => m.content);
-    // Full transcript imported, including content PAST the cap of 50 — proving
+    // Full transcript imported, including content PAST the cap of 50, proving
     // the cap bypass for the proven-non-anchoring frontier.
     expect(contents).toContain("general recovery transcript turn 0");
     expect(contents).toContain("general recovery transcript turn 59");
@@ -1750,7 +1750,7 @@ describe("LcmContextEngine afterTurn", () => {
     const sessionId = "placeholder-real-frontier-no-contaminate";
     const sessionKey = "agent:main:placeholder-real-frontier-no-contaminate";
 
-    // Real (anchoring) conversation rows — NOT injected metadata.
+    // Real (anchoring) conversation rows, NOT injected metadata.
     await engine.ingest({
       sessionId,
       sessionKey,
@@ -1876,7 +1876,7 @@ describe("LcmContextEngine afterTurn", () => {
     // no-anchor cap (50) would otherwise import 0 (cap-blocked), so the host keeps
     // sending the raw transcript every turn until the provider context window
     // overflows. The proven non-anchoring metadata frontier lifts the cap so the
-    // full real history recovers and becomes compactable — without losing it.
+    // full real history recovers and becomes compactable, without losing it.
     const warnLog = vi.fn();
     const engine = createEngineWithDeps(
       {},
@@ -2111,6 +2111,401 @@ describe("LcmContextEngine afterTurn", () => {
       await engine.getConversationStore().getMessages(conversation!.conversationId)
     ).map((m) => m.content);
     expect(finalContents).toContain("third turn assistant");
+  });
+
+  // Production frontier shapes on a group channel. These rows are PURE
+  // OpenClaw-injected inbound decoration (a room-event header and/or a Delivery
+  // prelude wrapping a Conversation-info metadata block) with no real user body,
+  // so they are non-anchoring, but they do NOT start with the bare
+  // "Conversation info (untrusted metadata)" prefix that the #837/#822
+  // classifier matched, so the frontier froze forever.
+  // These shapes mirror real frozen-frontier rows seen on disk: every real
+  // frozen row carries a non-empty trailing body (a Chat-history block, a
+  // Current-event block, or a system line) AND classification now keys off the
+  // inbound metadata, not the body. One reproduces a room_event frontier and one
+  // an un-addressed user_request frontier.
+  const ROOM_EVENT_FRONTIER_ROW =
+    "[OpenClaw room event]\n\n" +
+    "inbound_event_kind: room_event\n\n" +
+    "visible_reply_contract: message_tool_only\n\n" +
+    "Room context:\n" +
+    "Delivery: Final assistant text is not automatically delivered in this run. " +
+    "Use the `message` tool to send user-visible output.\n\n" +
+    "Conversation info (untrusted metadata):\n" +
+    "```json\n" +
+    "{\n" +
+    '  "chat_id": "channel:C0CHANNEL1",\n' +
+    '  "conversation_label": "#general",\n' +
+    '  "sender": "sam.rivera",\n' +
+    '  "inbound_event_kind": "room_event",\n' +
+    '  "is_group_chat": true,\n' +
+    '  "explicitly_mentioned_bot": false,\n' +
+    '  "mention_source": "none",\n' +
+    '  "history_count": 11\n' +
+    "}\n" +
+    "```\n\n" +
+    "Sender (untrusted metadata):\n" +
+    "```json\n" +
+    "{\n" +
+    '  "label": "sam.rivera (U0EXAMPLE01)",\n' +
+    '  "id": "U0EXAMPLE01",\n' +
+    '  "name": "sam.rivera"\n' +
+    "}\n" +
+    "```\n\n" +
+    "Chat history since last reply (untrusted, for context):\n" +
+    "```json\n" +
+    '[{"sender":"sam.rivera","body":"/lcm status"}]\n' +
+    "```\n\n" +
+    "Current event:\nSlack message in #general from sam.rivera";
+  const UNADDRESSED_DELIVERY_FRONTIER_ROW =
+    "Delivery: Final assistant text is not automatically delivered in this run. " +
+    "Use the `message` tool to send user-visible output.\n\n" +
+    "Conversation info (untrusted metadata):\n" +
+    "```json\n" +
+    "{\n" +
+    '  "chat_id": "channel:C0CHANNEL1",\n' +
+    '  "conversation_label": "#general",\n' +
+    '  "sender": "lee.chen",\n' +
+    '  "inbound_event_kind": "user_request",\n' +
+    '  "is_group_chat": true,\n' +
+    '  "explicitly_mentioned_bot": false,\n' +
+    '  "mention_source": "none",\n' +
+    '  "history_count": 2\n' +
+    "}\n" +
+    "```\n\n" +
+    "Sender (untrusted metadata):\n" +
+    "```json\n" +
+    "{\n" +
+    '  "label": "lee.chen (U0EXAMPLE02)",\n' +
+    '  "id": "U0EXAMPLE02",\n' +
+    '  "name": "lee.chen"\n' +
+    "}\n" +
+    "```\n\n" +
+    "Chat history since last reply (untrusted, for context):\n" +
+    "```json\n" +
+    '[{"sender":"sam.rivera","body":"/new"}]\n' +
+    "```\n\n" +
+    ":white_check_mark: New session started.";
+  // An ADDRESSED user turn: same Delivery shape, but the metadata says the bot
+  // was directly addressed (explicitly_mentioned_bot:true / mention_source:reply)
+  // and a real user question trails the metadata. MUST classify as anchoring.
+  const ADDRESSED_FRONTIER_ROW =
+    "Delivery: Final assistant text is not automatically delivered in this run. " +
+    "Use the `message` tool to send user-visible output.\n\n" +
+    "Conversation info (untrusted metadata):\n" +
+    "```json\n" +
+    "{\n" +
+    '  "chat_id": "channel:C0CHANNEL1",\n' +
+    '  "conversation_label": "#general",\n' +
+    '  "sender": "sam.rivera",\n' +
+    '  "inbound_event_kind": "user_request",\n' +
+    '  "is_group_chat": true,\n' +
+    '  "explicitly_mentioned_bot": true,\n' +
+    '  "mention_source": "reply",\n' +
+    '  "history_count": 2\n' +
+    "}\n" +
+    "```\n\n" +
+    "Sender (untrusted metadata):\n" +
+    "```json\n" +
+    "{\n" +
+    '  "label": "sam.rivera (U0EXAMPLE01)",\n' +
+    '  "id": "U0EXAMPLE01",\n' +
+    '  "name": "sam.rivera"\n' +
+    "}\n" +
+    "```\n\n" +
+    "<@U0EXAMPLE03> can you summarize the deploy status?";
+
+  it("afterTurn recovers a checkpoint-missing conversation whose frontier is OpenClaw room-event/Delivery decoration", async () => {
+    // A checkpoint-missing conversation (NO bootstrap_state row, so
+    // reason="checkpoint-missing") already passes GATE 1, but the frontier rows
+    // are room-event/Delivery-prefixed injected decoration, not the bare
+    // "Conversation info" preamble, so conversationFrontierIsEntirelyNonAnchoring
+    // returned false (GATE 2) and the conversation froze. The widened classifier
+    // recognizes these as non-anchoring so recovery fires.
+    const warnLog = vi.fn();
+    const engine = createEngineWithDeps(
+      {},
+      { log: { info: vi.fn(), warn: warnLog, error: vi.fn(), debug: vi.fn() } },
+    );
+    const sessionId = "session-room-event-checkpoint-missing";
+    const sessionKey = "agent:agent-one:slack:channel:room-event-cm";
+
+    await engine.ingest({
+      sessionId,
+      sessionKey,
+      message: makeMessage({ role: "user", content: UNADDRESSED_DELIVERY_FRONTIER_ROW }),
+    });
+    const conversation = await engine.getConversationStore().getConversationForSession({
+      sessionId,
+      sessionKey,
+    });
+    expect(conversation).not.toBeNull();
+    await engine.getConversationStore().markConversationBootstrapped(conversation!.conversationId);
+    expect(
+      await engine.getSummaryStore().getConversationBootstrapState(conversation!.conversationId),
+    ).toBeNull();
+
+    const sessionFile = createSessionFilePath("session-room-event-checkpoint-missing");
+    writeLeafTranscript(sessionFile, [
+      { role: "user", content: "RECALL_FACT_ALPHA is teal-lantern-3." },
+      { role: "assistant", content: "noted the fact" },
+      { role: "user", content: "follow-up question" },
+      { role: "assistant", content: "follow-up answer" },
+    ]);
+
+    await engine.afterTurn({
+      sessionId,
+      sessionKey,
+      sessionFile,
+      messages: [
+        makeMessage({ role: "user", content: "follow-up question" }),
+        makeMessage({ role: "assistant", content: "follow-up answer" }),
+      ],
+      prePromptMessageCount: 0,
+      tokenBudget: 4_096,
+    });
+
+    // RED-before-fix: this is the freeze, not a setup error.
+    const warns = warnLog.mock.calls.map((c) => String(c[0]));
+    expect(warns.some((m) => m.includes("did not cover the transcript frontier"))).toBe(false);
+
+    const contents = (await engine.getConversationStore().getMessages(conversation!.conversationId))
+      .map((m) => m.content);
+    expect(contents).toContain("RECALL_FACT_ALPHA is teal-lantern-3.");
+    expect(contents).toContain("follow-up answer");
+
+    const advancedState = await engine
+      .getSummaryStore()
+      .getConversationBootstrapState(conversation!.conversationId);
+    expect(advancedState).not.toBeNull();
+    expect(advancedState?.lastProcessedOffset).toBeGreaterThan(0);
+  });
+
+  it("afterTurn recovers an all-zero placeholder conversation on the slow (append-only-ineligible) path with an OpenClaw room-event frontier", async () => {
+    // An idle-created channel session carries an ALL-ZERO placeholder
+    // bootstrap_state row, so a row EXISTS and reason resolves to
+    // "append-only-ineligible" (NOT "checkpoint-missing"), GATE 1 kept the
+    // slow-path no-anchor recovery off. Its frontier rows are room-event/Delivery
+    // decoration, GATE 2 kept the frontier classified as anchoring. Both gates
+    // compounded into a permanent "did not cover the transcript frontier" freeze.
+    // The placeholder-lane recovery opens GATE 1 and the widened classifier
+    // resolves the frontier as non-anchoring.
+    const warnLog = vi.fn();
+    const engine = createEngineWithDeps(
+      {},
+      { log: { info: vi.fn(), warn: warnLog, error: vi.fn(), debug: vi.fn() } },
+    );
+    const sessionId = "session-placeholder-room-event-slow-path";
+    const sessionKey = "agent:agent-two:slack:channel:placeholder-room-event";
+
+    await engine.ingest({
+      sessionId,
+      sessionKey,
+      message: makeMessage({ role: "user", content: ROOM_EVENT_FRONTIER_ROW }),
+    });
+    await engine.ingest({
+      sessionId,
+      sessionKey,
+      message: makeMessage({ role: "user", content: UNADDRESSED_DELIVERY_FRONTIER_ROW }),
+    });
+    const conversation = await engine.getConversationStore().getConversationForSession({
+      sessionId,
+      sessionKey,
+    });
+    expect(conversation).not.toBeNull();
+    await engine.getConversationStore().markConversationBootstrapped(conversation!.conversationId);
+
+    // Leading malformed line at offset 0 forces the appended-bytes strict parse
+    // to fail (canUseAppendOnly=false) so the SLOW path runs with
+    // reason="append-only-ineligible", while the lenient full re-read still
+    // yields the valid rows that follow.
+    const sessionFile = createSessionFilePath("session-placeholder-room-event-slow-path");
+    const txLine = (role: AgentMessage["role"], text: string) =>
+      `${JSON.stringify({ message: { role, content: [{ type: "text", text }] } })}\n`;
+    writeFileSync(
+      sessionFile,
+      `not-json\n${txLine("user", "RECALL_FACT_BETA is rust-anchor-9.")}${txLine(
+        "assistant",
+        "noted the placeholder fact",
+      )}${txLine("user", "placeholder follow-up question")}${txLine(
+        "assistant",
+        "placeholder follow-up answer",
+      )}`,
+      "utf8",
+    );
+
+    await engine.getSummaryStore().upsertConversationBootstrapState({
+      conversationId: conversation!.conversationId,
+      sessionFilePath: sessionFile,
+      lastSeenSize: 0,
+      lastSeenMtimeMs: 0,
+      lastProcessedOffset: 0,
+      lastProcessedEntryHash: null,
+    });
+
+    await engine.afterTurn({
+      sessionId,
+      sessionKey,
+      sessionFile,
+      messages: [
+        makeMessage({ role: "user", content: "placeholder follow-up question" }),
+        makeMessage({ role: "assistant", content: "placeholder follow-up answer" }),
+      ],
+      prePromptMessageCount: 0,
+      tokenBudget: 4_096,
+    });
+
+    // RED-before-fix: this is the freeze, not a setup error.
+    const warns = warnLog.mock.calls.map((c) => String(c[0]));
+    expect(warns.some((m) => m.includes("did not cover the transcript frontier"))).toBe(false);
+
+    const contents = (await engine.getConversationStore().getMessages(conversation!.conversationId))
+      .map((m) => m.content);
+    expect(contents).toContain("RECALL_FACT_BETA is rust-anchor-9.");
+    expect(contents).toContain("placeholder follow-up answer");
+
+    const advancedState = await engine
+      .getSummaryStore()
+      .getConversationBootstrapState(conversation!.conversationId);
+    expect(advancedState?.lastProcessedOffset).toBeGreaterThan(0);
+  });
+
+  it("afterTurn STILL freezes an append-only-ineligible conversation whose checkpoint already advanced past offset 0 (#649 bound: non-placeholder)", async () => {
+    // The placeholder-lane relaxation is bounded to the never-ingested placeholder lane. A
+    // checkpoint that already advanced (lastProcessedOffset > 0) is NOT a
+    // placeholder, so neverIngestedCheckpoint stays false and the conversation
+    // must freeze per #649 rather than blindly import an unanchored transcript.
+    const warnLog = vi.fn();
+    const engine = createEngineWithDeps(
+      {},
+      { log: { info: vi.fn(), warn: warnLog, error: vi.fn(), debug: vi.fn() } },
+    );
+    const sessionId = "session-nonplaceholder-still-freezes";
+    const sessionKey = "agent:agent-two:slack:channel:nonplaceholder";
+
+    await engine.ingest({
+      sessionId,
+      sessionKey,
+      message: makeMessage({ role: "user", content: ROOM_EVENT_FRONTIER_ROW }),
+    });
+    const conversation = await engine.getConversationStore().getConversationForSession({
+      sessionId,
+      sessionKey,
+    });
+    expect(conversation).not.toBeNull();
+    await engine.getConversationStore().markConversationBootstrapped(conversation!.conversationId);
+
+    const sessionFile = createSessionFilePath("session-nonplaceholder-still-freezes");
+    const txLine = (role: AgentMessage["role"], text: string) =>
+      `${JSON.stringify({ message: { role, content: [{ type: "text", text }] } })}\n`;
+    writeFileSync(
+      sessionFile,
+      `not-json\n${txLine("user", "unrelated rewritten question")}${txLine(
+        "assistant",
+        "unrelated rewritten answer",
+      )}`,
+      "utf8",
+    );
+
+    // A NON-placeholder checkpoint: offset already advanced. Same-path,
+    // non-shrunk => reason="append-only-ineligible", placeholderCheckpoint=false.
+    await engine.getSummaryStore().upsertConversationBootstrapState({
+      conversationId: conversation!.conversationId,
+      sessionFilePath: sessionFile,
+      lastSeenSize: 5,
+      lastSeenMtimeMs: 1,
+      lastProcessedOffset: 5,
+      lastProcessedEntryHash: null,
+    });
+
+    await engine.afterTurn({
+      sessionId,
+      sessionKey,
+      sessionFile,
+      messages: [makeMessage({ role: "assistant", content: "unrelated rewritten answer" })],
+      prePromptMessageCount: 0,
+      tokenBudget: 4_096,
+    });
+
+    const warns = warnLog.mock.calls.map((c) => String(c[0]));
+    expect(warns.some((m) => m.includes("did not cover the transcript frontier"))).toBe(true);
+
+    const stored = await engine.getConversationStore().getMessages(conversation!.conversationId);
+    expect(stored.map((m) => m.content)).toEqual([ROOM_EVENT_FRONTIER_ROW]);
+    const state = await engine
+      .getSummaryStore()
+      .getConversationBootstrapState(conversation!.conversationId);
+    expect(state?.lastProcessedOffset).toBe(5);
+  });
+
+  it("afterTurn STILL freezes a placeholder conversation whose frontier holds an ADDRESSED turn (#649/#824 bound: directed frontier)", async () => {
+    // The classifier keys off the inbound metadata, not the trailing body: a frontier
+    // row whose metadata says the bot WAS addressed (explicitly_mentioned_bot:true
+    // / mention_source:"reply") is a real directed turn and MUST NOT be treated as
+    // ambient decoration, so the conversation freezes per #649/#824 instead of
+    // importing a divergent transcript over real history. This is the #824
+    // contamination guard for the un-addressed relaxation.
+    const warnLog = vi.fn();
+    const engine = createEngineWithDeps(
+      {},
+      { log: { info: vi.fn(), warn: warnLog, error: vi.fn(), debug: vi.fn() } },
+    );
+    const sessionId = "session-addressed-frontier-still-freezes";
+    const sessionKey = "agent:agent-two:slack:channel:addressed-frontier";
+
+    // A Delivery row whose metadata marks the bot as directly addressed. Despite
+    // the same wrapper shape as the recoverable rows, this is anchoring.
+    await engine.ingest({
+      sessionId,
+      sessionKey,
+      message: makeMessage({ role: "user", content: ADDRESSED_FRONTIER_ROW }),
+    });
+    const conversation = await engine.getConversationStore().getConversationForSession({
+      sessionId,
+      sessionKey,
+    });
+    expect(conversation).not.toBeNull();
+    await engine.getConversationStore().markConversationBootstrapped(conversation!.conversationId);
+
+    const sessionFile = createSessionFilePath("session-addressed-frontier-still-freezes");
+    const txLine = (role: AgentMessage["role"], text: string) =>
+      `${JSON.stringify({ message: { role, content: [{ type: "text", text }] } })}\n`;
+    writeFileSync(
+      sessionFile,
+      `not-json\n${txLine("user", "divergent rewritten question")}${txLine(
+        "assistant",
+        "divergent rewritten answer",
+      )}`,
+      "utf8",
+    );
+
+    await engine.getSummaryStore().upsertConversationBootstrapState({
+      conversationId: conversation!.conversationId,
+      sessionFilePath: sessionFile,
+      lastSeenSize: 0,
+      lastSeenMtimeMs: 0,
+      lastProcessedOffset: 0,
+      lastProcessedEntryHash: null,
+    });
+
+    await engine.afterTurn({
+      sessionId,
+      sessionKey,
+      sessionFile,
+      messages: [makeMessage({ role: "assistant", content: "divergent rewritten answer" })],
+      prePromptMessageCount: 0,
+      tokenBudget: 4_096,
+    });
+
+    const warns = warnLog.mock.calls.map((c) => String(c[0]));
+    expect(warns.some((m) => m.includes("did not cover the transcript frontier"))).toBe(true);
+
+    const stored = await engine.getConversationStore().getMessages(conversation!.conversationId);
+    expect(stored.map((m) => m.content)).toEqual([ADDRESSED_FRONTIER_ROW]);
+    const state = await engine
+      .getSummaryStore()
+      .getConversationBootstrapState(conversation!.conversationId);
+    expect(state?.lastProcessedOffset).toBe(0);
   });
 
   it("afterTurn does not recover checkpoint-missing delivery-only transcript traffic", async () => {

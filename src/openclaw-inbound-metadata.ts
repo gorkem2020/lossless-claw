@@ -1,6 +1,14 @@
 const OPENCLAW_INBOUND_METADATA_BLOCK_RE =
   /^(Conversation info \(untrusted metadata\)|Sender \(untrusted metadata\)):\r?\n```json\r?\n([\s\S]*?)\r?\n```/;
 
+// OpenClaw-version-coupled inbound decoration string: the header an OpenClaw
+// runtime prepends to a user turn that carries an ambient room event (channel
+// chatter the agent was not directly addressed by). Treated like the Delivery
+// prelude, a non-anchoring wrapper (not real user content).
+const OPENCLAW_ROOM_EVENT_HEADER = "[OpenClaw room event]";
+
+const CONVERSATION_INFO_HEADING = "Conversation info (untrusted metadata):";
+
 const CONVERSATION_INFO_KEYS = new Set([
   "chat_id",
   "message_id",
@@ -101,6 +109,69 @@ export function canonicalizeOpenClawInboundMetadataIdentityContent(
   return remaining.trim().length > 0
     ? `${prelude}${canonicalBlocks.join("\n\n")}\n\n${remaining}`
     : content;
+}
+
+/**
+ * True only when a user row is an OpenClaw AMBIENT (non-anchoring) inbound
+ * delivery, decided by the injected inbound metadata rather than the trailing
+ * body. Such a row anchors no directed conversation, so a stuck offset-0
+ * placeholder / checkpoint-missing frontier built only from these rows can
+ * recover instead of freezing.
+ *
+ * Returns true ONLY when role === "user" AND a parseable "Conversation info
+ * (untrusted metadata)" block is present (located through the same optional
+ * "[OpenClaw room event]" header and "Delivery:" prelude the rest of this
+ * module handles) AND the parsed metadata is either an explicit room event, or
+ * a clearly un-addressed delivery (explicitly_mentioned_bot === false AND
+ * mention_source === "none").
+ *
+ * SAFETY (#824 contamination zone): under-match is the safe direction. Any
+ * parse failure, a missing/unexpected flag, an addressed turn
+ * (explicitly_mentioned_bot === true or mention_source !== "none"), or a
+ * non-user role returns false. The un-addressed case requires BOTH fields; if
+ * mention_source is absent we do NOT treat the row as ambient unless the event
+ * is an explicit room_event. A real directed turn is never misclassified as
+ * ambient regardless of its trailing body.
+ */
+export function isOpenClawAmbientInboundRecord(role: string, content: string): boolean {
+  if (role !== "user") {
+    return false;
+  }
+
+  let metadataBearing = content.trimStart();
+  if (metadataBearing.startsWith(OPENCLAW_ROOM_EVENT_HEADER)) {
+    const headingIndex = metadataBearing.indexOf(CONVERSATION_INFO_HEADING);
+    if (headingIndex === -1) {
+      return false;
+    }
+    metadataBearing = metadataBearing.slice(headingIndex);
+  }
+
+  const { metadataCandidate } = splitOpenClawInboundMetadataPrelude(metadataBearing);
+  const conversationCandidate = metadataCandidate.trimStart();
+  const conversationMatch = OPENCLAW_INBOUND_METADATA_BLOCK_RE.exec(conversationCandidate);
+  if (!conversationMatch || conversationMatch[1] !== "Conversation info (untrusted metadata)") {
+    return false;
+  }
+
+  const record = parseOpenClawInboundMetadataRecord(conversationMatch[1], conversationMatch[2] ?? "");
+  if (!record) {
+    return false;
+  }
+
+  if (record.inbound_event_kind === "room_event") {
+    return true;
+  }
+
+  const mentioned = record.explicitly_mentioned_bot;
+  const mentionSource = record.mention_source;
+  if (mentioned === true) {
+    return false;
+  }
+  if (mentionSource !== undefined && mentionSource !== "none") {
+    return false;
+  }
+  return mentioned === false && mentionSource === "none";
 }
 
 function splitOpenClawInboundMetadataPrelude(content: string): {
