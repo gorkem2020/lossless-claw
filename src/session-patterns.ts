@@ -21,3 +21,29 @@ export function compileSessionPatterns(patterns: string[]): RegExp[] {
 export function matchesSessionPattern(sessionKey: string, patterns: RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(sessionKey));
 }
+
+const SESSION_KEY_CHANNEL_SCOPE = /^(.*:channel:[^:]+)(?::thread:[^:]+|:active-memory:[^:]+)*$/;
+
+/**
+ * The agent-and-channel scope a session key belongs to, with thread and
+ * active-memory suffixes stripped. Sibling sessions of the same agent on the
+ * same channel share this scope; keys without a channel segment have none.
+ */
+export function sessionKeyChannelScope(
+  sessionKey: string | null | undefined,
+): string | null {
+  if (!sessionKey) {
+    return null;
+  }
+  const match = SESSION_KEY_CHANNEL_SCOPE.exec(sessionKey);
+  return match ? match[1] : null;
+}
+
+/** Whether two session keys are siblings of the same agent on the same channel. */
+export function sessionKeysAreSameAgentChannelSiblings(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): boolean {
+  const scopeA = sessionKeyChannelScope(a);
+  return scopeA !== null && scopeA === sessionKeyChannelScope(b);
+}

@@ -1736,6 +1736,153 @@ describe("LcmContextEngine afterTurn", () => {
     ).toBe(true);
   });
 
+  it("allows checkpoint-missing recovery when the colliding raw ids belong only to a same-agent same-channel sibling conversation", async () => {
+    const warnLog = vi.fn();
+    const engine = createEngineWithDeps(
+      {},
+      { log: { info: vi.fn(), warn: warnLog, error: vi.fn(), debug: vi.fn() } },
+    );
+
+    const sharedMessages = [
+      makeMessage({
+        role: "user",
+        content: [{ type: "text", id: "sibling-shared-user", text: "shared channel user turn" }],
+      }),
+      makeMessage({
+        role: "assistant",
+        content: [{ type: "text", id: "sibling-shared-assistant", text: "shared channel answer" }],
+      }),
+    ];
+
+    const siblingSessionFile = createSessionFilePath("sibling-thread-owner");
+    writeLeafTranscriptMessages(siblingSessionFile, sharedMessages);
+    await engine.bootstrap({
+      sessionId: "sibling-thread-owner",
+      sessionKey: "agent:scout:slack:channel:lobby:thread:1700000000.000100",
+      sessionFile: siblingSessionFile,
+    });
+
+    const baseSessionId = "sibling-base-candidate";
+    const baseSessionKey = "agent:scout:slack:channel:lobby";
+    await engine.ingest({
+      sessionId: baseSessionId,
+      sessionKey: baseSessionKey,
+      message: makeMessage({
+        role: "user",
+        content: "Conversation info (untrusted metadata): sibling base candidate",
+      }),
+    });
+    const baseConversation = await engine.getConversationStore().getConversationForSession({
+      sessionId: baseSessionId,
+      sessionKey: baseSessionKey,
+    });
+    expect(baseConversation).not.toBeNull();
+    await engine
+      .getConversationStore()
+      .markConversationBootstrapped(baseConversation!.conversationId);
+    expect(
+      await engine
+        .getSummaryStore()
+        .getConversationBootstrapState(baseConversation!.conversationId),
+    ).toBeNull();
+
+    const candidateSessionFile = createSessionFilePath("sibling-base-candidate");
+    writeLeafTranscriptMessages(candidateSessionFile, sharedMessages);
+
+    await engine.afterTurn({
+      sessionId: baseSessionId,
+      sessionKey: baseSessionKey,
+      sessionFile: candidateSessionFile,
+      messages: [],
+      prePromptMessageCount: 0,
+      tokenBudget: 4_096,
+    });
+
+    const baseMessages = await engine
+      .getConversationStore()
+      .getMessages(baseConversation!.conversationId);
+    expect(baseMessages.map((message) => message.content)).toEqual([
+      "Conversation info (untrusted metadata): sibling base candidate",
+      "shared channel user turn",
+      "shared channel answer",
+    ]);
+    expect(
+      warnLog.mock.calls
+        .map((c) => String(c[0]))
+        .some((m) => m.includes("candidate raw ids already exist in other active conversations")),
+    ).toBe(false);
+  });
+
+  it("blocks checkpoint-missing recovery when the colliding raw ids belong to a same-agent different-channel conversation", async () => {
+    const warnLog = vi.fn();
+    const engine = createEngineWithDeps(
+      {},
+      { log: { info: vi.fn(), warn: warnLog, error: vi.fn(), debug: vi.fn() } },
+    );
+
+    const ownedMessages = [
+      makeMessage({
+        role: "user",
+        content: [{ type: "text", id: "other-channel-user", text: "other channel user turn" }],
+      }),
+      makeMessage({
+        role: "assistant",
+        content: [{ type: "text", id: "other-channel-assistant", text: "other channel answer" }],
+      }),
+    ];
+
+    const ownerSessionFile = createSessionFilePath("other-channel-owner");
+    writeLeafTranscriptMessages(ownerSessionFile, ownedMessages);
+    await engine.bootstrap({
+      sessionId: "other-channel-owner",
+      sessionKey: "agent:scout:slack:channel:annex",
+      sessionFile: ownerSessionFile,
+    });
+
+    const candidateSessionId = "other-channel-candidate";
+    const candidateSessionKey = "agent:scout:slack:channel:lobby";
+    await engine.ingest({
+      sessionId: candidateSessionId,
+      sessionKey: candidateSessionKey,
+      message: makeMessage({
+        role: "user",
+        content: "Conversation info (untrusted metadata): other channel candidate",
+      }),
+    });
+    const candidateConversation = await engine.getConversationStore().getConversationForSession({
+      sessionId: candidateSessionId,
+      sessionKey: candidateSessionKey,
+    });
+    expect(candidateConversation).not.toBeNull();
+    await engine
+      .getConversationStore()
+      .markConversationBootstrapped(candidateConversation!.conversationId);
+
+    const candidateSessionFile = createSessionFilePath("other-channel-candidate");
+    writeLeafTranscriptMessages(candidateSessionFile, ownedMessages);
+
+    await engine.afterTurn({
+      sessionId: candidateSessionId,
+      sessionKey: candidateSessionKey,
+      sessionFile: candidateSessionFile,
+      messages: [],
+      prePromptMessageCount: 0,
+      tokenBudget: 4_096,
+    });
+
+    const candidateMessages = await engine
+      .getConversationStore()
+      .getMessages(candidateConversation!.conversationId);
+    expect(candidateMessages.map((message) => message.content)).toEqual([
+      "Conversation info (untrusted metadata): other channel candidate",
+    ]);
+    expect(
+      warnLog.mock.calls
+        .map((c) => String(c[0]))
+        .some((m) => m.includes("blocked checkpoint-missing-recovery no-anchor import")),
+    ).toBe(true);
+  });
+
   it("does NOT import an unrelated transcript onto a placeholder-checkpoint conversation that already holds real anchoring rows (#824 contamination guard)", async () => {
     // The failure that closed PR #824: a placeholder checkpoint can coexist with
     // real persisted rows; blindly opening an unbounded no-anchor import would

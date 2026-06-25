@@ -3,6 +3,8 @@ import {
   compileSessionPattern,
   compileSessionPatterns,
   matchesSessionPattern,
+  sessionKeyChannelScope,
+  sessionKeysAreSameAgentChannelSiblings,
 } from "../src/session-patterns.js";
 
 describe("session ignore patterns", () => {
@@ -27,5 +29,36 @@ describe("session ignore patterns", () => {
     expect(matchesSessionPattern("agent:main:cron:nightly:run:run-123", patterns)).toBe(true);
     expect(matchesSessionPattern("agent:ops:subagent:123", patterns)).toBe(true);
     expect(matchesSessionPattern("agent:main:main", patterns)).toBe(false);
+  });
+});
+
+describe("session key channel scope", () => {
+  it("reduces base, thread, and active-memory variants to one channel scope", () => {
+    const base = "agent:scout:slack:channel:lobby";
+    expect(sessionKeyChannelScope(base)).toBe(base);
+    expect(sessionKeyChannelScope("agent:scout:slack:channel:lobby:thread:1700000000.000100")).toBe(base);
+    expect(sessionKeyChannelScope("agent:scout:slack:channel:lobby:active-memory:abc123")).toBe(base);
+    expect(
+      sessionKeyChannelScope("agent:scout:slack:channel:lobby:thread:1700000000.000100:active-memory:abc123"),
+    ).toBe(base);
+  });
+
+  it("has no channel scope for keys without a channel segment", () => {
+    expect(sessionKeyChannelScope("agent:scout:direct-session")).toBeNull();
+    expect(sessionKeyChannelScope("agent:main:main")).toBeNull();
+    expect(sessionKeyChannelScope(undefined)).toBeNull();
+    expect(sessionKeyChannelScope("")).toBeNull();
+  });
+
+  it("treats only same-agent same-channel keys as siblings", () => {
+    const base = "agent:scout:slack:channel:lobby";
+    const thread = "agent:scout:slack:channel:lobby:thread:1700000000.000100";
+    const memory = "agent:scout:slack:channel:lobby:active-memory:abc123";
+    expect(sessionKeysAreSameAgentChannelSiblings(base, thread)).toBe(true);
+    expect(sessionKeysAreSameAgentChannelSiblings(thread, memory)).toBe(true);
+    expect(sessionKeysAreSameAgentChannelSiblings(base, "agent:relay:slack:channel:lobby")).toBe(false);
+    expect(sessionKeysAreSameAgentChannelSiblings(base, "agent:scout:slack:channel:annex")).toBe(false);
+    expect(sessionKeysAreSameAgentChannelSiblings(base, "agent:scout:direct-session")).toBe(false);
+    expect(sessionKeysAreSameAgentChannelSiblings(undefined, undefined)).toBe(false);
   });
 });
