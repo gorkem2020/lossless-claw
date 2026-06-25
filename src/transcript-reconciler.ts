@@ -28,6 +28,7 @@ import {
   toStoredMessage,
   type StoredMessage,
 } from "./message-content.js";
+import { isOpenClawAmbientInboundRecord } from "./openclaw-inbound-metadata.js";
 import {
   createBootstrapEntryHash,
   createLosslessMessageSignature,
@@ -523,7 +524,11 @@ export class TranscriptReconciler {
     });
     return (
       frontier.length === existingMessageCount &&
-      frontier.every((message) => isLikelyInjectedMetadataPreambleRecord(message))
+      frontier.every(
+        (message) =>
+          isLikelyInjectedMetadataPreambleRecord(message) ||
+          isOpenClawAmbientInboundRecord(message.role, message.content),
+      )
     );
   }
 
@@ -2102,9 +2107,22 @@ export class TranscriptReconciler {
     // bootstrapped_at alone as lineage proof. The downstream no-anchor
     // import path is itself guarded (replay-overlap detection, import cap,
     // delivery-only block).
+    // An idle-created channel session carries an ALL-ZERO placeholder
+    // bootstrap_state row, so a row EXISTS and reason resolves to
+    // "append-only-ineligible", never "checkpoint-missing". Both lanes were
+    // never ingested, so the slow path treats the placeholder like a missing
+    // checkpoint and recovers via the same non-anchoring-frontier guard the
+    // checkpoint-missing lane uses; otherwise the frontier freezes forever.
+    const placeholderCheckpoint =
+      !!checkpoint &&
+      checkpoint.lastSeenSize === 0 &&
+      checkpoint.lastSeenMtimeMs === 0 &&
+      checkpoint.lastProcessedOffset === 0 &&
+      checkpoint.lastProcessedEntryHash === null;
+    const neverIngestedCheckpoint = reason === "checkpoint-missing" || placeholderCheckpoint;
     let checkpointMissingMetadataFrontier = false;
     if (
-      reason === "checkpoint-missing" &&
+      neverIngestedCheckpoint &&
       conversation.sessionId === params.sessionId &&
       conversation.bootstrappedAt !== null
     ) {
@@ -2112,7 +2130,7 @@ export class TranscriptReconciler {
         await this.conversationFrontierIsEntirelyNonAnchoring(conversation.conversationId);
     }
     const recoverCheckpointMissingNoAnchor =
-      reason === "checkpoint-missing" &&
+      neverIngestedCheckpoint &&
       (params.allowNoAnchorImportOnCheckpointMissing === true ||
         checkpointMissingMetadataFrontier);
     // A transcript whose session header id differs from the checkpoint's
@@ -2155,7 +2173,9 @@ export class TranscriptReconciler {
       noAnchorImportReason: recoverCheckpointMissingNoAnchor
         ? params.allowNoAnchorImportOnCheckpointMissing === true
           ? "rotate-checkpoint-missing"
-          : "checkpoint-missing-recovery"
+          : reason === "checkpoint-missing"
+            ? "checkpoint-missing-recovery"
+            : "placeholder-checkpoint-recovery"
         : declaredEpochRollover && reason === "append-only-ineligible"
           ? "declared-epoch-rollover"
           : reason,
