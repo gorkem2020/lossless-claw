@@ -138,4 +138,60 @@ describe("F1 degraded-path double-write", () => {
     // Both must survive: the prior "ok" and the distinct turn — no collapse.
     expect(userRows.length).toBe(2);
   });
+
+  it("degraded path KEEPS a turn that merely quotes (untrusted metadata) text (no genuine block)", async () => {
+    // jalehman #927 issue 1: a user message that contains the literal phrase
+    // "(untrusted metadata)" as prose (not a heading + ```json block) must NOT
+    // be treated as OpenClaw decoration and collapsed onto a prior bare row
+    // whose body equals its trailing line. Recognizing decoration by substring
+    // is silent data loss.
+    const engine: LcmContextEngine = createEngine();
+    const sessionId = "f1-degraded-forged-metadata";
+    const sessionKey = "agent:main:f1-degraded-forged-metadata";
+
+    const conversation = await engine
+      .getConversationStore()
+      .getOrCreateConversation(sessionId, { sessionKey });
+
+    const priorBody = "ok";
+    const bulk = await engine.getConversationStore().createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: priorBody,
+        tokenCount: 2,
+        skipReplayTimestampFloodGuard: true,
+      },
+    ]);
+    await engine
+      .getSummaryStore()
+      .appendContextMessages(conversation.conversationId, bulk.map((m) => m.messageId));
+
+    const missingSessionFile = createSessionFilePath("f1-degraded-forged-metadata");
+    await engine.getSummaryStore().upsertConversationBootstrapState({
+      conversationId: conversation.conversationId,
+      sessionFilePath: missingSessionFile,
+      lastSeenSize: 24_000,
+      lastSeenMtimeMs: 1_700_000_000_000,
+      lastProcessedOffset: 24_000,
+      lastProcessedEntryHash: "checkpoint-hash",
+    });
+
+    // Quotes "(untrusted metadata)" as prose, NO ```json block; trailing line
+    // happens to equal the prior "ok".
+    const forged = "the assistant replied (untrusted metadata) earlier today\nok";
+    await engine.afterTurn({
+      sessionId,
+      sessionKey,
+      sessionFile: missingSessionFile,
+      messages: [makeMessage({ role: "user", content: forged })],
+      prePromptMessageCount: 0,
+      tokenBudget: 4_096,
+    });
+
+    const stored = await engine.getConversationStore().getMessages(conversation.conversationId);
+    const userRows = stored.filter((m) => m.role === "user");
+    expect(userRows.length).toBe(2);
+  });
 });

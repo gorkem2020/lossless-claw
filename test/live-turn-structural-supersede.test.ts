@@ -255,6 +255,66 @@ describe("appendUncoveredVolatileLiveInputsWithinBudget fail-closed: distinct tu
     );
     expect(bareSurvives).toBe(true);
   });
+
+  it("does NOT supersede a distinct multiline live turn whose trailing line equals a bare assembled row", () => {
+    // jalehman #927 issue 2: the live current turn is an ORDINARY multiline user
+    // message ("here is more context\nok") with NO recognized decoration — no
+    // channel timestamp on the body, no metadata block. It merely ends with a
+    // line equal to an earlier bare assembled row ("ok"). Line-aligned
+    // containment alone must NOT supersede it; that would silently drop the
+    // earlier turn.
+    const assembledMessages: AgentMessage[] = [
+      { role: "user", content: "earlier persisted turn" },
+      { role: "assistant", content: "earlier reply" },
+      { role: "user", content: "ok" },
+    ] as AgentMessage[];
+    const liveMessages: AgentMessage[] = [
+      { role: "user", content: "here is more context\nok" },
+    ] as AgentMessage[];
+
+    const result = appendUncoveredVolatileLiveInputsWithinBudget({
+      assembledMessages,
+      assembledEstimatedTokens: 10,
+      liveMessages,
+      tokenBudget: 1_000_000,
+    });
+
+    const okSurvives = result.messages.some(
+      (message) =>
+        (message as { role: string }).role === "user" &&
+        (message as { content: string }).content === "ok",
+    );
+    expect(okSurvives).toBe(true);
+  });
+
+  it("does NOT supersede when the live turn merely quotes (untrusted metadata) text", () => {
+    // jalehman #927 issue 1, assembly side: a live turn that contains
+    // "(untrusted metadata)" as prose (no heading + ```json block) and ends with
+    // a line equal to a bare assembled row must NOT be treated as a decorated
+    // current-turn copy.
+    const assembledMessages: AgentMessage[] = [
+      { role: "user", content: "earlier persisted turn" },
+      { role: "assistant", content: "earlier reply" },
+      { role: "user", content: "ok" },
+    ] as AgentMessage[];
+    const liveMessages: AgentMessage[] = [
+      { role: "user", content: "the bot said (untrusted metadata) to me\nok" },
+    ] as AgentMessage[];
+
+    const result = appendUncoveredVolatileLiveInputsWithinBudget({
+      assembledMessages,
+      assembledEstimatedTokens: 10,
+      liveMessages,
+      tokenBudget: 1_000_000,
+    });
+
+    const okSurvives = result.messages.some(
+      (message) =>
+        (message as { role: string }).role === "user" &&
+        (message as { content: string }).content === "ok",
+    );
+    expect(okSurvives).toBe(true);
+  });
 });
 
 describe("appendUncoveredVolatileLiveInputsWithinBudget preserves same-body tail turns", () => {

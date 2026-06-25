@@ -29,6 +29,27 @@ export function stripLeadingOpenClawInboundTimestamp(value: string): string {
   return match ? value.slice(match[0].length) : value;
 }
 
+/**
+ * True when `content` begins with a genuine OpenClaw injected inbound-metadata
+ * block (after an optional leading channel timestamp and `Delivery:` hint): a
+ * heading line equal to a known untrusted-metadata sentinel ("Conversation info
+ * (untrusted metadata):" / "Sender (untrusted metadata):"), immediately
+ * followed by a ```json fenced body that parses to a non-array object carrying
+ * at least one heading-specific key. That fenced-object-under-a-known-heading
+ * frame is the unforgeable signature of OpenClaw decoration: a user who merely
+ * quotes or types "(untrusted metadata)" in prose does not reproduce it, so
+ * their message is never mistaken for decoration.
+ */
+export function contentBeginsWithOpenClawInboundMetadataBlock(content: string): boolean {
+  const afterTimestamp = stripLeadingOpenClawInboundTimestamp(content.trimStart());
+  const { metadataCandidate } = splitOpenClawInboundMetadataPrelude(afterTimestamp);
+  const match = OPENCLAW_INBOUND_METADATA_BLOCK_RE.exec(metadataCandidate.trimStart());
+  if (!match) {
+    return false;
+  }
+  return parseOpenClawInboundMetadataRecord(match[1] ?? "", match[2] ?? "") !== null;
+}
+
 const CONVERSATION_INFO_KEYS = new Set([
   "chat_id",
   "message_id",

@@ -7,7 +7,10 @@ import { contentFromParts } from "./assembler.js";
 import { buildMessageParts, toStoredMessage, toSyntheticMessagePartRecord } from "./message-content.js";
 import { createLiveCoverageSignature, hashAgentMessageForAssemblyProtection, messagesHaveSameLiveCoverageSignature } from "./message-signatures.js";
 import type { AgentMessage } from "./openclaw-bridge.js";
-import { stripLeadingOpenClawInboundTimestamp } from "./openclaw-inbound-metadata.js";
+import {
+  contentBeginsWithOpenClawInboundMetadataBlock,
+  stripLeadingOpenClawInboundTimestamp,
+} from "./openclaw-inbound-metadata.js";
 import { estimateAgentMessageTokens } from "./token-accounting.js";
 import { buildToolPairIndexesByAssembledIndex, expandProtectedToolPairIndexes, expandToolPairLiveSortIndexes } from "./tool-pairing.js";
 import { sanitizeToolUseResultPairing } from "./transcript-repair.js";
@@ -538,11 +541,57 @@ export function liveContentContainsBareBody(params: {
 }
 
 /**
+ * Recognize whether `liveContent` is the bare body wrapped in RECOGNIZED
+ * decoration (the decorated, model-facing face of the same turn as
+ * `bareContent`), as opposed to an unrelated turn that merely ends with the
+ * same trailing line. It must structurally contain the bare body (line-aligned
+ * trailing segment) AND carry recognized decoration evidence:
+ *   - a genuine OpenClaw injected metadata block leads the content (validated
+ *     by shape, not by a "(untrusted metadata)" substring), OR
+ *   - the bare body appears as a CHANNEL-TIMESTAMP-prefixed trailing line (the
+ *     channel always stamps the model-facing body), OR
+ *   - the whole content reduces to the bare body once a single leading channel
+ *     timestamp is stripped.
+ * Arbitrary user text (a distinct multiline turn, or quoted "(untrusted
+ * metadata)" prose) has none of these, so it is never collapsed, preventing
+ * silent data loss.
+ */
+export function liveContentIsRecognizedDecoratedBareBody(params: {
+  liveContent: string;
+  bareContent: string;
+}): boolean {
+  if (!liveContentContainsBareBody(params)) {
+    return false;
+  }
+  if (contentBeginsWithOpenClawInboundMetadataBlock(params.liveContent)) {
+    return true;
+  }
+  const bareNoTimestamp = stripLeadingOpenClawInboundTimestamp(params.bareContent.trim()).trim();
+  if (bareNoTimestamp.length === 0) {
+    return false;
+  }
+  const liveTrimmed = params.liveContent.trimEnd();
+  if (stripLeadingOpenClawInboundTimestamp(liveTrimmed.trimStart()).trim() === bareNoTimestamp) {
+    return true;
+  }
+  const lastNewline = liveTrimmed.lastIndexOf("\n");
+  const trailingLine = lastNewline < 0 ? liveTrimmed : liveTrimmed.slice(lastNewline + 1);
+  const trailingWithoutTimestamp = stripLeadingOpenClawInboundTimestamp(trailingLine);
+  return (
+    trailingWithoutTimestamp !== trailingLine &&
+    trailingWithoutTimestamp.trim() === bareNoTimestamp
+  );
+}
+
+/**
  * Recognize whether an assembled user row is a BARE copy of the live current
- * turn (its persisted face), purely structurally: it must be a line-aligned
- * trailing segment of the live content AND strictly shorter than it. The
+ * turn (its persisted face): it must be a line-aligned trailing segment of the
+ * live content, strictly shorter than it, AND the live content must carry
+ * recognized decoration (see liveContentIsRecognizedDecoratedBareBody). The
  * strictly-shorter guard distinguishes a bare/timestamped body row from the
- * decorated live copy itself without any decoration-tag knowledge.
+ * decorated live copy itself (equal length, never collapsed); the decoration
+ * gate prevents collapsing an unrelated turn that merely ends with the same
+ * trailing line.
  */
 function assembledRowIsStructuralBareCurrentTurn(params: {
   liveContent: string;
@@ -554,7 +603,7 @@ function assembledRowIsStructuralBareCurrentTurn(params: {
   if (params.assembledContent.length >= params.liveContent.length) {
     return false;
   }
-  return liveContentContainsBareBody({
+  return liveContentIsRecognizedDecoratedBareBody({
     liveContent: params.liveContent,
     bareContent: params.assembledContent,
   });

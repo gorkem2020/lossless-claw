@@ -13,7 +13,7 @@ import {
   parseFileBlocks,
   type FileBlock,
 } from "./large-files.js";
-import { liveContentContainsBareBody } from "./live-coverage.js";
+import { liveContentIsRecognizedDecoratedBareBody } from "./live-coverage.js";
 import {
   extractStructuredText,
   RAW_PAYLOAD_EXTERNALIZATION_REASON,
@@ -22,7 +22,6 @@ import {
   type StoredMessage,
 } from "./message-content.js";
 import { messageIdentity } from "./message-signatures.js";
-import { stripLeadingOpenClawInboundTimestamp } from "./openclaw-inbound-metadata.js";
 import type { AgentMessage } from "./openclaw-bridge.js";
 import type { ConversationStore, MessageRecord } from "./store/conversation-store.js";
 import { buildMessageIdentityHash } from "./store/message-identity.js";
@@ -67,14 +66,14 @@ export class BatchDeduplicator {
    * identities match, OR when the runtime copy is the DECORATED face of the
    * persisted bare body of the same turn. OpenClaw delivers the current turn
    * twice — the transcript persists the BARE body, while the runtime array
-   * carries a per-turn DECORATED copy (a "Conversation info" wrapper or a
-   * leading channel timestamp). Their identities differ, so the afterTurn batch
-   * would persist the decorated copy as a second row (the store double-write).
-   * Structural containment (the same fail-closed, line-aligned primitive used at
-   * assembly time — the bare body is the live content's trailing user text, with
-   * an optional leading channel timestamp) recognizes the decorated copy without
-   * hard-coding any decoration shape. User-role only; a genuinely distinct turn
-   * (one that does not line-align-contain the bare body) is never collapsed.
+   * carries a per-turn DECORATED copy (a genuine "(untrusted metadata)" block or
+   * a leading channel timestamp). Their identities differ, so the afterTurn
+   * batch would otherwise persist the decorated copy as a second row (the store
+   * double-write). liveContentIsRecognizedDecoratedBareBody collapses it only
+   * when the runtime copy structurally contains the bare body AND carries
+   * recognized decoration (a structurally-validated metadata block or a channel
+   * timestamp) — user-role only. A genuinely distinct turn, or one that merely
+   * quotes "(untrusted metadata)" prose, is never collapsed (silent data loss).
    */
   private runtimeRowCoversPersistedFrontierRow(
     persistedRole: string,
@@ -91,21 +90,10 @@ export class BatchDeduplicator {
     if (persistedRole !== "user" || batchRole !== "user") {
       return false;
     }
-    if (!liveContentContainsBareBody({ liveContent: batchContent, bareContent: persistedContent })) {
-      return false;
-    }
-    // Fail-closed decoration gate: only collapse when the runtime copy is the
-    // bare body wrapped in RECOGNIZED OpenClaw decoration — a leading channel
-    // timestamp (the copy reduces to the bare body once it is stripped) or an
-    // "(untrusted metadata)" Conversation-info / Sender block. If the extra
-    // leading text is arbitrary user content (a genuinely distinct turn whose
-    // trailing line merely equals a short prior body), keep it — collapsing it
-    // would be silent data loss.
-    const bare = persistedContent.trim();
-    if (stripLeadingOpenClawInboundTimestamp(batchContent).trim() === bare) {
-      return true;
-    }
-    return batchContent.includes("(untrusted metadata)");
+    return liveContentIsRecognizedDecoratedBareBody({
+      liveContent: batchContent,
+      bareContent: persistedContent,
+    });
   }
 
   async alignRuntimeBatchAgainstCoveredFrontier(
