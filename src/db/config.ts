@@ -1,5 +1,6 @@
 import { homedir } from "os";
 import { join } from "path";
+import { MIN_FALLBACK_MAX_TOKENS } from "../summary-fallback.js";
 
 /**
  * Resolve the active OpenClaw state directory.
@@ -174,6 +175,8 @@ export type LcmConfig = {
   maxAssemblyTokenBudget?: number;
   /** Maximum allowed overage factor for summaries relative to target tokens (default 3). */
   summaryMaxOverageFactor: number;
+  /** Maximum token budget for deterministic fallback summaries when the LLM summarizer fails (default 512, minimum 64). */
+  fallbackMaxTokens?: number;
   /** Custom instructions injected into all summarization prompts. */
   customInstructions: string;
   /** Consecutive auth failures before the compaction circuit breaker trips (default 5). */
@@ -346,6 +349,17 @@ function toStrictPositiveInteger(value: number | undefined): number | undefined 
     return undefined;
   }
   if (!Number.isInteger(value) || value < 1) {
+    return undefined;
+  }
+  return value;
+}
+
+/** Accept only integer config values at or above a minimum. Invalid values fall back. */
+function toIntegerAtLeast(value: number | undefined, minimum: number): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  if (!Number.isInteger(value) || value < minimum) {
     return undefined;
   }
   return value;
@@ -794,6 +808,9 @@ export function resolveLcmConfigWithDiagnostics(
       summaryMaxOverageFactor:
         parseFiniteNumber(env.LCM_SUMMARY_MAX_OVERAGE_FACTOR)
           ?? toNumber(pc.summaryMaxOverageFactor) ?? 3,
+      fallbackMaxTokens:
+        toIntegerAtLeast(parseFiniteInt(env.LCM_FALLBACK_MAX_TOKENS), MIN_FALLBACK_MAX_TOKENS)
+          ?? toIntegerAtLeast(toNumber(pc.fallbackMaxTokens), MIN_FALLBACK_MAX_TOKENS) ?? 512,
       customInstructions:
         env.LCM_CUSTOM_INSTRUCTIONS?.trim() ?? toStr(pc.customInstructions) ?? "",
       circuitBreakerThreshold:

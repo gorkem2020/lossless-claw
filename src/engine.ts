@@ -50,7 +50,11 @@ import { SummaryStore, type ContextItemRecord } from "./store/summary-store.js";
 import { createLcmSummarizeFromLegacyParams, FALLBACK_SUMMARY_MARKER, LcmProviderAuthError, LcmSummarySpendLimitError, type LcmSummarizeFn } from "./summarize.js";
 import type { LcmDependencies } from "./types.js";
 import { estimateTokens } from "./estimate-tokens.js";
-import { buildDeterministicFallbackSummary } from "./summary-fallback.js";
+import {
+  buildDeterministicFallbackSummary,
+  FALLBACK_DIRECTIVE_SUMMARY_MARKER,
+  MIN_FALLBACK_MAX_TOKENS,
+} from "./summary-fallback.js";
 import { getTranscriptEntryId, readAppendedLeafPathMessages, readLastJsonlEntryBeforeOffset, readLeafPathMessages, readSessionParentSessionReference, resolveTranscriptMessageCreatedAt } from "./transcript.js";
 import { type TranscriptReconcileResult } from "./reconcile-plan.js";
 import { checkpointIsPastTranscriptEof, TranscriptReconciler } from "./transcript-reconciler.js";
@@ -438,6 +442,7 @@ export class LcmContextEngine implements ContextEngine {
       maxRounds: 10,
       timezone: this.config.timezone,
       summaryMaxOverageFactor: this.config.summaryMaxOverageFactor,
+      fallbackMaxTokens: this.config.fallbackMaxTokens,
       stripInjectedContextTags: this.config.stripInjectedContextTags,
     };
     this.compaction = new CompactionEngine(
@@ -1582,7 +1587,10 @@ export class LcmContextEngine implements ContextEngine {
       );
     }
     this.deps.log.error(`[lcm] resolveSummarize: FALLING BACK TO EMERGENCY TRUNCATION`);
-    return { summarize: createEmergencyFallbackSummarize(), summaryModel: "emergency-fallback" };
+    return {
+      summarize: createEmergencyFallbackSummarize(this.config.fallbackMaxTokens),
+      summaryModel: "emergency-fallback",
+    };
   }
 
   /**
@@ -4345,17 +4353,26 @@ export class LcmContextEngine implements ContextEngine {
  * convergence. This function simply provides a stable baseline summarize
  * callback to keep compaction operable when runtime setup is unavailable.
  */
-function createEmergencyFallbackSummarize(): (
+function createEmergencyFallbackSummarize(fallbackMaxTokens?: number): (
   text: string,
   aggressive?: boolean,
 ) => Promise<string> {
+  const resolvedFallbackMaxTokens =
+    typeof fallbackMaxTokens === "number" &&
+    Number.isFinite(fallbackMaxTokens) &&
+    fallbackMaxTokens >= MIN_FALLBACK_MAX_TOKENS
+      ? Math.floor(fallbackMaxTokens)
+      : undefined;
   return async (text: string, aggressive?: boolean): Promise<string> => {
     const targetTokens = aggressive ? 600 : 900;
-    const fallbackSummary = buildDeterministicFallbackSummary(text, targetTokens).trim();
+    const fallbackSummary = buildDeterministicFallbackSummary(text, targetTokens, {
+      maxTokens: resolvedFallbackMaxTokens,
+    }).trim();
     if (!fallbackSummary) {
       return FALLBACK_SUMMARY_MARKER;
     }
-    return fallbackSummary.includes(FALLBACK_SUMMARY_MARKER)
+    return fallbackSummary.includes(FALLBACK_SUMMARY_MARKER) ||
+      fallbackSummary.includes(FALLBACK_DIRECTIVE_SUMMARY_MARKER)
       ? fallbackSummary
       : `${fallbackSummary}\n${FALLBACK_SUMMARY_MARKER}`;
   };
