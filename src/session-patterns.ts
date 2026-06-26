@@ -39,11 +39,8 @@ export function sessionKeyChannelScope(
   return match ? match[1] : null;
 }
 
-/** Whether two session keys are siblings of the same agent on the same channel. */
-export function sessionKeysAreSameAgentChannelSiblings(
-  a: string | null | undefined,
-  b: string | null | undefined,
-): boolean {
-  const scopeA = sessionKeyChannelScope(a);
-  return scopeA !== null && scopeA === sessionKeyChannelScope(b);
+/** Whether a session key names the base session for its agent and channel. */
+export function isBaseChannelSessionKey(sessionKey: string | null | undefined): boolean {
+  const scope = sessionKeyChannelScope(sessionKey);
+  return scope !== null && scope === sessionKey;
 }

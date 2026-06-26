@@ -36,7 +36,7 @@ import {
   messageIdentity,
 } from "./message-signatures.js";
 import { resolveEpochRoute, selectEntryIdTail, transcriptImportCap } from "./reconcile-plan.js";
-import { sessionKeyChannelScope } from "./session-patterns.js";
+import { isBaseChannelSessionKey, sessionKeyChannelScope } from "./session-patterns.js";
 import {
   externalizedReplayMetadataMatches,
   extractPlainToolReplayTextsById,
@@ -1081,11 +1081,10 @@ export class TranscriptReconciler {
   }
 
   /**
-   * Count candidate raw event IDs that already belong to a FOREIGN active
-   * conversation. Sibling sessions of the same agent on the same channel
-   * (the base channel session, its thread forks, and active-memory variants)
-   * inherit a shared transcript prefix via parentSession, so their raw ids
-   * overlap legitimately and must not count against the recovery.
+   * Count candidate raw event IDs that already belong to a foreign active
+   * conversation. A base channel session may collide with rows from its forked
+   * thread and active-memory sessions because they inherit the parent prefix.
+   * Thread and variant candidates are still checked against sibling rows.
    */
   private countActiveCrossConversationRawIdMatches(params: {
     conversationId: number;
@@ -1112,12 +1111,17 @@ export class TranscriptReconciler {
       return { candidateRawIds: 0, matchedRawIds: 0 };
     }
 
-    const siblingScope = sessionKeyChannelScope(params.sessionKey);
+    const siblingScope = isBaseChannelSessionKey(params.sessionKey)
+      ? sessionKeyChannelScope(params.sessionKey)
+      : null;
     const siblingClause = siblingScope
       ? `AND NOT (
-           c.session_key = $siblingScope
-           OR c.session_key LIKE $siblingThreadPrefix ESCAPE '\\'
-           OR c.session_key LIKE $siblingMemoryPrefix ESCAPE '\\'
+           c.session_key IS NOT NULL
+           AND (
+             c.session_key = $siblingScope
+             OR c.session_key LIKE $siblingThreadPrefix ESCAPE '\\'
+             OR c.session_key LIKE $siblingMemoryPrefix ESCAPE '\\'
+           )
          )`
       : "";
     const escapeLike = (value: string): string => value.replace(/[\\%_]/g, "\\$&");

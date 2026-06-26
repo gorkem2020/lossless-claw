@@ -1813,6 +1813,145 @@ describe("LcmContextEngine afterTurn", () => {
     ).toBe(false);
   });
 
+  it("blocks checkpoint-missing recovery when colliding raw ids belong to a keyless active conversation", async () => {
+    const warnLog = vi.fn();
+    const engine = createEngineWithDeps(
+      {},
+      { log: { info: vi.fn(), warn: warnLog, error: vi.fn(), debug: vi.fn() } },
+    );
+
+    const ownedMessages = [
+      makeMessage({
+        role: "user",
+        content: [{ type: "text", id: "keyless-owner-user", text: "keyless owner user turn" }],
+      }),
+      makeMessage({
+        role: "assistant",
+        content: [{ type: "text", id: "keyless-owner-assistant", text: "keyless owner answer" }],
+      }),
+    ];
+
+    const ownerSessionFile = createSessionFilePath("keyless-rawid-owner");
+    writeLeafTranscriptMessages(ownerSessionFile, ownedMessages);
+    await engine.bootstrap({
+      sessionId: "keyless-rawid-owner",
+      sessionFile: ownerSessionFile,
+    });
+
+    const candidateSessionId = "keyless-collision-candidate";
+    const candidateSessionKey = "agent:scout:slack:channel:lobby";
+    await engine.ingest({
+      sessionId: candidateSessionId,
+      sessionKey: candidateSessionKey,
+      message: makeMessage({
+        role: "user",
+        content: "Conversation info (untrusted metadata): keyless collision candidate",
+      }),
+    });
+    const candidateConversation = await engine.getConversationStore().getConversationForSession({
+      sessionId: candidateSessionId,
+      sessionKey: candidateSessionKey,
+    });
+    expect(candidateConversation).not.toBeNull();
+    await engine
+      .getConversationStore()
+      .markConversationBootstrapped(candidateConversation!.conversationId);
+
+    const candidateSessionFile = createSessionFilePath("keyless-collision-candidate");
+    writeLeafTranscriptMessages(candidateSessionFile, ownedMessages);
+
+    await engine.afterTurn({
+      sessionId: candidateSessionId,
+      sessionKey: candidateSessionKey,
+      sessionFile: candidateSessionFile,
+      messages: [],
+      prePromptMessageCount: 0,
+      tokenBudget: 4_096,
+    });
+
+    const candidateMessages = await engine
+      .getConversationStore()
+      .getMessages(candidateConversation!.conversationId);
+    expect(candidateMessages.map((message) => message.content)).toEqual([
+      "Conversation info (untrusted metadata): keyless collision candidate",
+    ]);
+    expect(
+      warnLog.mock.calls
+        .map((c) => String(c[0]))
+        .some((m) => m.includes("blocked checkpoint-missing-recovery no-anchor import")),
+    ).toBe(true);
+  });
+
+  it("blocks checkpoint-missing recovery when colliding raw ids belong to another same-channel thread", async () => {
+    const warnLog = vi.fn();
+    const engine = createEngineWithDeps(
+      {},
+      { log: { info: vi.fn(), warn: warnLog, error: vi.fn(), debug: vi.fn() } },
+    );
+
+    const threadOneMessages = [
+      makeMessage({
+        role: "user",
+        content: [{ type: "text", id: "thread-one-user", text: "thread one user turn" }],
+      }),
+      makeMessage({
+        role: "assistant",
+        content: [{ type: "text", id: "thread-one-assistant", text: "thread one answer" }],
+      }),
+    ];
+
+    const ownerSessionFile = createSessionFilePath("same-channel-thread-owner");
+    writeLeafTranscriptMessages(ownerSessionFile, threadOneMessages);
+    await engine.bootstrap({
+      sessionId: "same-channel-thread-owner",
+      sessionKey: "agent:scout:slack:channel:lobby:thread:1700000000.000100",
+      sessionFile: ownerSessionFile,
+    });
+
+    const candidateSessionId = "same-channel-thread-candidate";
+    const candidateSessionKey = "agent:scout:slack:channel:lobby:thread:1700000000.000200";
+    await engine.ingest({
+      sessionId: candidateSessionId,
+      sessionKey: candidateSessionKey,
+      message: makeMessage({
+        role: "user",
+        content: "Conversation info (untrusted metadata): same-channel thread candidate",
+      }),
+    });
+    const candidateConversation = await engine.getConversationStore().getConversationForSession({
+      sessionId: candidateSessionId,
+      sessionKey: candidateSessionKey,
+    });
+    expect(candidateConversation).not.toBeNull();
+    await engine
+      .getConversationStore()
+      .markConversationBootstrapped(candidateConversation!.conversationId);
+
+    const candidateSessionFile = createSessionFilePath("same-channel-thread-candidate");
+    writeLeafTranscriptMessages(candidateSessionFile, threadOneMessages);
+
+    await engine.afterTurn({
+      sessionId: candidateSessionId,
+      sessionKey: candidateSessionKey,
+      sessionFile: candidateSessionFile,
+      messages: [],
+      prePromptMessageCount: 0,
+      tokenBudget: 4_096,
+    });
+
+    const candidateMessages = await engine
+      .getConversationStore()
+      .getMessages(candidateConversation!.conversationId);
+    expect(candidateMessages.map((message) => message.content)).toEqual([
+      "Conversation info (untrusted metadata): same-channel thread candidate",
+    ]);
+    expect(
+      warnLog.mock.calls
+        .map((c) => String(c[0]))
+        .some((m) => m.includes("blocked checkpoint-missing-recovery no-anchor import")),
+    ).toBe(true);
+  });
+
   it("blocks checkpoint-missing recovery when the colliding raw ids belong to a same-agent different-channel conversation", async () => {
     const warnLog = vi.fn();
     const engine = createEngineWithDeps(
