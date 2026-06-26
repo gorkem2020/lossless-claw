@@ -36,6 +36,7 @@ import {
   messageIdentity,
 } from "./message-signatures.js";
 import { resolveEpochRoute, selectEntryIdTail, transcriptImportCap } from "./reconcile-plan.js";
+import { isBaseChannelSessionKey, sessionKeyChannelScope } from "./session-patterns.js";
 import {
   externalizedReplayMetadataMatches,
   extractPlainToolReplayTextsById,
@@ -987,6 +988,7 @@ export class TranscriptReconciler {
       const rawIdMatches = this.countActiveCrossConversationRawIdMatches({
         conversationId,
         sessionId,
+        sessionKey: params.sessionKey,
         messages: noAnchorImportMessages,
       });
       if (rawIdMatches.matchedRawIds > 0) {
@@ -1078,10 +1080,16 @@ export class TranscriptReconciler {
     return { blockedByImportCap: false, importedMessages, hasOverlap: adoptedMessages > 0 };
   }
 
-  /** Count candidate raw event IDs that already belong to another active conversation. */
+  /**
+   * Count candidate raw event IDs that already belong to a foreign active
+   * conversation. A base channel session may collide with rows from its forked
+   * thread and active-memory sessions because they inherit the parent prefix.
+   * Thread and variant candidates are still checked against sibling rows.
+   */
   private countActiveCrossConversationRawIdMatches(params: {
     conversationId: number;
     sessionId: string;
+    sessionKey?: string;
     messages: AgentMessage[];
   }): { candidateRawIds: number; matchedRawIds: number } {
     const candidateRawIds = new Set<string>();
@@ -1103,51 +1111,63 @@ export class TranscriptReconciler {
       return { candidateRawIds: 0, matchedRawIds: 0 };
     }
 
+    const siblingScope = isBaseChannelSessionKey(params.sessionKey)
+      ? sessionKeyChannelScope(params.sessionKey)
+      : null;
+    const siblingClause = siblingScope
+      ? `AND NOT (
+           c.session_key IS NOT NULL
+           AND (
+             c.session_key = $siblingScope
+             OR c.session_key LIKE $siblingThreadPrefix ESCAPE '\\'
+             OR c.session_key LIKE $siblingMemoryPrefix ESCAPE '\\'
+           )
+         )`
+      : "";
+    const escapeLike = (value: string): string => value.replace(/[\\%_]/g, "\\$&");
+    const siblingBindings: Record<string, string> = siblingScope
+      ? {
+          $siblingScope: siblingScope,
+          $siblingThreadPrefix: `${escapeLike(siblingScope)}:thread:%`,
+          $siblingMemoryPrefix: `${escapeLike(siblingScope)}:active-memory:%`,
+        }
+      : {};
+
     const matchStmt = this.host.db.prepare(
       `SELECT 1 AS found
        FROM message_parts mp
        JOIN messages m ON m.message_id = mp.message_id
        JOIN conversations c ON c.conversation_id = m.conversation_id
        WHERE c.active = 1
-         AND m.conversation_id <> ?
+         AND m.conversation_id <> $conversationId
+         ${siblingClause}
          AND mp.metadata IS NOT NULL
          AND json_valid(mp.metadata)
          AND (
-           json_extract(mp.metadata, '$.raw.id') = ?
-           OR json_extract(mp.metadata, '$.raw.call_id') = ?
-           OR json_extract(mp.metadata, '$.raw.toolCallId') = ?
-           OR json_extract(mp.metadata, '$.raw.tool_call_id') = ?
-           OR json_extract(mp.metadata, '$.raw.toolUseId') = ?
-           OR json_extract(mp.metadata, '$.raw.tool_use_id') = ?
-           OR mp.tool_call_id = ?
-           OR json_extract(mp.metadata, '$.id') = ?
-           OR json_extract(mp.metadata, '$.call_id') = ?
-           OR json_extract(mp.metadata, '$.toolCallId') = ?
-           OR json_extract(mp.metadata, '$.tool_call_id') = ?
-           OR json_extract(mp.metadata, '$.toolUseId') = ?
-           OR json_extract(mp.metadata, '$.tool_use_id') = ?
+           json_extract(mp.metadata, '$.raw.id') = $rawId
+           OR json_extract(mp.metadata, '$.raw.call_id') = $rawId
+           OR json_extract(mp.metadata, '$.raw.toolCallId') = $rawId
+           OR json_extract(mp.metadata, '$.raw.tool_call_id') = $rawId
+           OR json_extract(mp.metadata, '$.raw.toolUseId') = $rawId
+           OR json_extract(mp.metadata, '$.raw.tool_use_id') = $rawId
+           OR mp.tool_call_id = $rawId
+           OR json_extract(mp.metadata, '$.id') = $rawId
+           OR json_extract(mp.metadata, '$.call_id') = $rawId
+           OR json_extract(mp.metadata, '$.toolCallId') = $rawId
+           OR json_extract(mp.metadata, '$.tool_call_id') = $rawId
+           OR json_extract(mp.metadata, '$.toolUseId') = $rawId
+           OR json_extract(mp.metadata, '$.tool_use_id') = $rawId
          )
        LIMIT 1`,
     );
 
     let matchedRawIds = 0;
     for (const rawId of candidateRawIds) {
-      const row = matchStmt.get(
-        params.conversationId,
-        rawId,
-        rawId,
-        rawId,
-        rawId,
-        rawId,
-        rawId,
-        rawId,
-        rawId,
-        rawId,
-        rawId,
-        rawId,
-        rawId,
-        rawId,
-      ) as { found: number } | undefined;
+      const row = matchStmt.get({
+        ...siblingBindings,
+        $conversationId: params.conversationId,
+        $rawId: rawId,
+      } as Record<string, string | number>) as { found: number } | undefined;
       if (row?.found === 1) {
         matchedRawIds += 1;
       }
