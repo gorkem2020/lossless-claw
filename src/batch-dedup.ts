@@ -126,9 +126,15 @@ export class BatchDeduplicator {
       storedBatch,
     );
     if (persistedIdentityOverlaps > 0) {
-      this.deps.log.warn(
-        `[lcm] afterTurn: runtime batch does not align with the covered transcript frontier and overlaps persisted history (${persistedIdentityOverlaps}/${batch.length}); failing closed — the transcript reconcile delivers real messages next turn conversation=${conversationId}`,
-      );
+      const overlapMessage = `[lcm] afterTurn: runtime batch does not align with the covered transcript frontier and overlaps persisted history (${persistedIdentityOverlaps}/${batch.length}); failing closed — the transcript reconcile delivers real messages next turn conversation=${conversationId}`;
+      // Full overlap (N === batch.length) means every row is already persisted, so
+      // failing closed drops nothing new: log at debug. A partial overlap still
+      // defers genuinely new rows to the reconcile and stays at warn.
+      if (persistedIdentityOverlaps === batch.length) {
+        this.deps.log.debug(overlapMessage);
+      } else {
+        this.deps.log.warn(overlapMessage);
+      }
       return [];
     }
     return batch;
