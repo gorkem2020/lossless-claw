@@ -413,6 +413,9 @@ function ensureConversationBootstrapStateEpochColumns(db: DatabaseSync): void {
   if (!columns.some((col) => col.name === "last_processed_entry_id")) {
     db.exec(`ALTER TABLE conversation_bootstrap_state ADD COLUMN last_processed_entry_id TEXT`);
   }
+  if (!columns.some((col) => col.name === "soft_reset_pruned_at")) {
+    db.exec(`ALTER TABLE conversation_bootstrap_state ADD COLUMN soft_reset_pruned_at TEXT`);
+  }
 }
 
 function backfillMessageIdentityHashes(
@@ -1190,6 +1193,7 @@ export function runLcmMigrations(
       last_processed_entry_id TEXT,
       fork_bounded INTEGER NOT NULL DEFAULT 0,
       fork_source_message_count INTEGER NOT NULL DEFAULT 0,
+      soft_reset_pruned_at TEXT,
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 

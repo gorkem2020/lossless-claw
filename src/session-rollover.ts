@@ -63,33 +63,39 @@ export class SessionRolloverDetector {
 
   /**
    * True when the host left an on-disk archive sibling beside a tracked
-   * transcript path — its `${basename}.reset.<ts>` (reset/new) or
-   * `${basename}.deleted.<ts>` (deletion) rename. A surviving sibling is
-   * durable, restart-proof evidence that a vanished tracked file was
-   * deliberately archived rather than silently lost. Mirrors the host's own
-   * archive-prefix convention (its reset hooks find archives by the same
-   * `${basename}.reset.` lookup prefix). Fails closed (false) on any I/O error.
+   * transcript path — its `${basename}.reset.<ts>` reset/new rename. A
+   * surviving sibling is durable, restart-proof evidence that a vanished
+   * tracked file was deliberately archived rather than silently lost. Mirrors
+   * the host's own archive-prefix convention (its reset hooks find archives by
+   * the same `${basename}.reset.` lookup prefix). Fails closed (false) on any
+   * I/O error.
    */
-  private async hasArchivedTranscriptSibling(trackedFile: string): Promise<boolean> {
+  private async hasResetTranscriptSibling(trackedFile: string): Promise<boolean> {
     const prefix = basename(trackedFile);
     if (!prefix) {
       return false;
     }
     const resetPrefix = `${prefix}.reset.`;
-    const deletedPrefix = `${prefix}.deleted.`;
     try {
       const entries = await readdir(dirname(trackedFile));
-      return entries.some(
-        (entry) => entry.startsWith(resetPrefix) || entry.startsWith(deletedPrefix),
-      );
+      return entries.some((entry) => entry.startsWith(resetPrefix));
     } catch (err) {
       if (!isMissingFileError(err)) {
         this.deps.log.warn(
-          `[lcm] could not scan for archived transcript sibling dir=${dirname(trackedFile)} file=${prefix} error=${describeLogError(err)}`,
+          `[lcm] could not scan for reset transcript sibling dir=${dirname(trackedFile)} file=${prefix} error=${describeLogError(err)}`,
         );
       }
       return false;
     }
+  }
+
+  /** Record that Lossless handled `/new` for the currently tracked transcript. */
+  async markSoftResetPrunedContext(conversationId: number): Promise<void> {
+    await this.summaryStore.markSoftResetPrunedContext(conversationId);
+  }
+
+  private hasSoftResetArchiveSignal(params: { softResetPrunedAt: Date | null } | null): boolean {
+    return params?.softResetPrunedAt instanceof Date;
   }
 
   /**
@@ -143,15 +149,18 @@ export class SessionRolloverDetector {
       }
     }
 
-    // The tracked transcript is gone, but if the host left an on-disk archive
-    // sibling (its `${basename}.reset.`/`.deleted.` rename) the file was
-    // deliberately archived by a /new soft reset (or a host-missed /reset),
-    // not silently lost. Stand the destructive rotate down and let the
-    // ambiguous-rollover path rebind the conversation in place — preserving
-    // the retained summary band — under its own freshness gate.
-    if (await this.hasArchivedTranscriptSibling(trackedSessionFile)) {
+    // The tracked transcript is gone, but if the host left a reset archive
+    // sibling and Lossless already handled `/new` for this tracked transcript, the file was
+    // deliberately archived by a soft reset, not silently lost. Stand the
+    // destructive rotate down and let the ambiguous-rollover path rebind the
+    // conversation in place — preserving the retained summary band — under its
+    // own freshness gate.
+    if (
+      await this.hasResetTranscriptSibling(trackedSessionFile)
+      && this.hasSoftResetArchiveSignal(activeBootstrapState)
+    ) {
       this.deps.log.info(
-        `[lcm] ${params.phase}: tracked transcript archived (reset/deleted sibling present); deferring to ambiguous-rollover rebind conversation=${activeByKey.conversationId} sessionKey=${normalizedSessionKey} oldSessionId=${activeByKey.sessionId} newSessionId=${params.sessionId} oldFile=${trackedSessionFile}`,
+        `[lcm] ${params.phase}: tracked transcript archived (reset sibling present); deferring to ambiguous-rollover rebind conversation=${activeByKey.conversationId} sessionKey=${normalizedSessionKey} oldSessionId=${activeByKey.sessionId} newSessionId=${params.sessionId} oldFile=${trackedSessionFile}`,
       );
       return false;
     }
@@ -260,13 +269,15 @@ export class SessionRolloverDetector {
         );
         return null;
       }
-      // The tracked transcript is gone. Treat it as an ambiguous rollover
-      // (eligible for the fresh-transcript rebind that preserves retained
-      // summaries) only when an on-disk archive sibling proves the host
-      // deliberately archived it — a /new soft reset or a host-missed /reset.
-      // A genuine silent loss leaves no sibling and falls to the destructive
-      // guard instead.
-      if (!(await this.hasArchivedTranscriptSibling(trackedSessionFile))) {
+      // The tracked transcript is gone. Treat it as an ambiguous rollover only
+      // when a reset archive sibling and a current lifecycle signal prove this
+      // was a handled `/new` soft reset. Generic `.reset.` archives can
+      // also be hard `/reset`; without the local prune signal, fail closed into
+      // the destructive guard instead.
+      if (
+        !(await this.hasResetTranscriptSibling(trackedSessionFile))
+        || !this.hasSoftResetArchiveSignal(activeBootstrapState)
+      ) {
         return null;
       }
     }
