@@ -10,7 +10,7 @@
  * archived the pruned conversation, stranding the retained summaries.
  *
  * Fix under test: when the tracked transcript is missing but an on-disk archive
- * sibling (`.reset.`/`.deleted.`) proves it was deliberately archived, the
+ * sibling (`.reset.`) proves it was deliberately archived, the
  * destructive guard stands down and the existing ambiguous-rollover path
  * rebinds the same conversation under its freshness gate — preserving the
  * retained summaries and re-anchoring to the NEW session file. A genuine loss
@@ -63,6 +63,7 @@ function createEngine(configOverrides: Partial<LcmConfig> = {}): {
   engine: LcmContextEngine;
   log: LogMock;
   db: ReturnType<typeof createLcmDatabaseConnection>;
+  config: LcmConfig;
 } {
   const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-sibling-"));
   tempDirs.push(tempDir);
@@ -80,7 +81,7 @@ function createEngine(configOverrides: Partial<LcmConfig> = {}): {
   };
   const engine = new LcmContextEngine(createTestDeps(config, log), db);
   (engine as unknown as { ensureMigrated(): void }).ensureMigrated();
-  return { engine, log, db };
+  return { engine, log, db, config };
 }
 
 function makeMessage(role: string, content: string, timestamp: number): AgentMessage {
@@ -224,14 +225,14 @@ async function seedSummaryBearingLane(
   return { conversationId, trackedFile };
 }
 
-/** Simulate the host's archive rename: trackedFile -> `${trackedFile}.<kind>.<ts>`. */
-function archiveTrackedFile(trackedFile: string, kind: "reset" | "deleted"): void {
-  renameSync(trackedFile, `${trackedFile}.${kind}.2026-06-29T120000-000Z`);
+/** Simulate the host's reset archive rename: trackedFile -> `${trackedFile}.reset.<ts>`. */
+function archiveTrackedFile(trackedFile: string): void {
+  renameSync(trackedFile, `${trackedFile}.reset.2026-06-29T120000-000Z`);
 }
 
 describe("/new soft-reset carry-forward via archive-sibling probe", () => {
   it("rebinds (not archives) when the tracked transcript was archived to a .reset. sibling", async () => {
-    const { engine, log, db } = createEngine({ newSessionRetainDepth: 2 });
+    const { engine, log, db, config } = createEngine({ newSessionRetainDepth: 2 });
     const lane = await seedSummaryBearingLane(engine, db);
 
     // /new prunes the conversation in place: only the depth>=2 summary survives.
@@ -244,10 +245,12 @@ describe("/new soft-reset carry-forward via archive-sibling probe", () => {
     expect(afterPrune.map((item) => item.summaryId)).toEqual(["sum_d2"]);
 
     // The host archived the old transcript and minted a fresh session file.
-    archiveTrackedFile(lane.trackedFile, "reset");
+    archiveTrackedFile(lane.trackedFile);
     const newSessionFile = writeRolledTranscript({ name: NEW_SESSION_ID, entries: freshEntries() });
+    const restartedEngine = new LcmContextEngine(createTestDeps(config, log), db);
+    (restartedEngine as unknown as { ensureMigrated(): void }).ensureMigrated();
 
-    const result = await engine.bootstrap({
+    const result = await restartedEngine.bootstrap({
       sessionId: NEW_SESSION_ID,
       sessionKey: SESSION_KEY,
       sessionFile: newSessionFile,
@@ -255,7 +258,7 @@ describe("/new soft-reset carry-forward via archive-sibling probe", () => {
 
     // Destructive guard stood down; the ambiguous path rebound the lane.
     expect(log.info).toHaveBeenCalledWith(
-      expect.stringContaining("tracked transcript archived (reset/deleted sibling present)"),
+      expect.stringContaining("tracked transcript archived (reset sibling present)"),
     );
     expect(log.warn).toHaveBeenCalledWith(
       expect.stringContaining("resolved by fresh-transcript rebind"),
@@ -265,7 +268,7 @@ describe("/new soft-reset carry-forward via archive-sibling probe", () => {
     );
 
     // Same conversation id, now bound to the new session; no replacement row.
-    const rebound = await engine.getConversationStore().getConversationBySessionKey(SESSION_KEY);
+    const rebound = await restartedEngine.getConversationStore().getConversationBySessionKey(SESSION_KEY);
     expect(rebound?.conversationId).toBe(lane.conversationId);
     expect(rebound?.sessionId).toBe(NEW_SESSION_ID);
     expect(rebound?.active).toBe(true);
@@ -273,15 +276,16 @@ describe("/new soft-reset carry-forward via archive-sibling probe", () => {
 
     // The retained depth-2 summary carried forward; the new transcript imported;
     // the checkpoint re-anchored to the NEW file (never the .reset. sibling).
-    const carried = await engine.getSummaryStore().getContextItems(lane.conversationId);
+    const carried = await restartedEngine.getSummaryStore().getContextItems(lane.conversationId);
     expect(carried.map((item) => item.summaryId)).toContain("sum_d2");
     expect(result.importedMessages).toBeGreaterThan(0);
-    const messages = await engine.getConversationStore().getMessages(lane.conversationId);
+    const messages = await restartedEngine.getConversationStore().getMessages(lane.conversationId);
     expect(messages.some((m) => m.content.includes("post-new turn"))).toBe(true);
-    const bootstrapState = await engine
+    const bootstrapState = await restartedEngine
       .getSummaryStore()
       .getConversationBootstrapState(lane.conversationId);
     expect(bootstrapState?.sessionFilePath).toBe(newSessionFile);
+    expect(bootstrapState?.softResetPrunedAt).toBeNull();
   });
 
   it("still archives and creates a replacement when the transcript is genuinely lost (no sibling)", async () => {
@@ -302,7 +306,36 @@ describe("/new soft-reset carry-forward via archive-sibling probe", () => {
       expect.stringContaining("detected reset/rollover without prior lifecycle split"),
     );
     expect(log.info).not.toHaveBeenCalledWith(
-      expect.stringContaining("tracked transcript archived (reset/deleted sibling present)"),
+      expect.stringContaining("tracked transcript archived (reset sibling present)"),
+    );
+
+    const original = await engine.getConversationStore().getConversation(lane.conversationId);
+    expect(original?.active).toBe(false);
+    const active = await engine.getConversationStore().getConversationBySessionKey(SESSION_KEY);
+    expect(active?.conversationId).not.toBe(lane.conversationId);
+    expect(active?.sessionId).toBe(NEW_SESSION_ID);
+  });
+
+  it("still archives when a .reset. sibling exists but /new pruning did not run", async () => {
+    const { engine, log, db } = createEngine({ newSessionRetainDepth: 2 });
+    const lane = await seedSummaryBearingLane(engine, db);
+
+    // OpenClaw also uses .reset. archives for hard /reset. Without Lossless'
+    // own /new prune signal, the fallback must preserve clean-reset semantics.
+    archiveTrackedFile(lane.trackedFile);
+    const newSessionFile = writeRolledTranscript({ name: NEW_SESSION_ID, entries: freshEntries() });
+
+    await engine.bootstrap({
+      sessionId: NEW_SESSION_ID,
+      sessionKey: SESSION_KEY,
+      sessionFile: newSessionFile,
+    });
+
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringContaining("detected reset/rollover without prior lifecycle split"),
+    );
+    expect(log.info).not.toHaveBeenCalledWith(
+      expect.stringContaining("tracked transcript archived (reset sibling present)"),
     );
 
     const original = await engine.getConversationStore().getConversation(lane.conversationId);
@@ -315,7 +348,12 @@ describe("/new soft-reset carry-forward via archive-sibling probe", () => {
   it("does NOT merge a foreign reused-key transcript even with a sibling (freshness gate holds)", async () => {
     const { engine, log, db } = createEngine({ newSessionRetainDepth: 2 });
     const lane = await seedSummaryBearingLane(engine, db);
-    archiveTrackedFile(lane.trackedFile, "reset");
+    await engine.handleBeforeReset({
+      reason: "new",
+      sessionId: OLD_SESSION_ID,
+      sessionKey: SESSION_KEY,
+    });
+    archiveTrackedFile(lane.trackedFile);
 
     // The "new" transcript overlaps the lane's own persisted history, so it is
     // NOT provably fresh: a foreign session reusing the key, not a real /new.
@@ -336,7 +374,7 @@ describe("/new soft-reset carry-forward via archive-sibling probe", () => {
 
     // Guard stood down (sibling), but the freshness gate refused the merge.
     expect(log.info).toHaveBeenCalledWith(
-      expect.stringContaining("tracked transcript archived (reset/deleted sibling present)"),
+      expect.stringContaining("tracked transcript archived (reset sibling present)"),
     );
     expect(result.bootstrapped).toBe(false);
     expect(result.reason).toBe("ambiguous session-key runtime rollover");
@@ -353,37 +391,4 @@ describe("/new soft-reset carry-forward via archive-sibling probe", () => {
     expect(conversation?.sessionId).toBe(OLD_SESSION_ID);
   });
 
-  it("treats a .deleted. archive sibling the same as a .reset. sibling (stands down + rebinds)", async () => {
-    const { engine, log, db } = createEngine({ newSessionRetainDepth: 2 });
-    const lane = await seedSummaryBearingLane(engine, db);
-
-    await engine.handleBeforeReset({
-      reason: "new",
-      sessionId: OLD_SESSION_ID,
-      sessionKey: SESSION_KEY,
-    });
-    archiveTrackedFile(lane.trackedFile, "deleted");
-    const newSessionFile = writeRolledTranscript({ name: NEW_SESSION_ID, entries: freshEntries() });
-
-    await engine.bootstrap({
-      sessionId: NEW_SESSION_ID,
-      sessionKey: SESSION_KEY,
-      sessionFile: newSessionFile,
-    });
-
-    expect(log.info).toHaveBeenCalledWith(
-      expect.stringContaining("tracked transcript archived (reset/deleted sibling present)"),
-    );
-    expect(log.warn).toHaveBeenCalledWith(
-      expect.stringContaining("resolved by fresh-transcript rebind"),
-    );
-    expect(log.warn).not.toHaveBeenCalledWith(
-      expect.stringContaining("detected reset/rollover without prior lifecycle split"),
-    );
-    const rebound = await engine.getConversationStore().getConversationBySessionKey(SESSION_KEY);
-    expect(rebound?.conversationId).toBe(lane.conversationId);
-    expect(rebound?.sessionId).toBe(NEW_SESSION_ID);
-    const carried = await engine.getSummaryStore().getContextItems(lane.conversationId);
-    expect(carried.map((item) => item.summaryId)).toContain("sum_d2");
-  });
 });
