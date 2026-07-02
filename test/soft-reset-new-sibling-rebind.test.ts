@@ -260,7 +260,7 @@ describe("/new soft-reset carry-forward via archive-sibling probe", () => {
     expect(log.info).toHaveBeenCalledWith(
       expect.stringContaining("tracked transcript archived (reset sibling present)"),
     );
-    expect(log.warn).toHaveBeenCalledWith(
+    expect(log.info).toHaveBeenCalledWith(
       expect.stringContaining("resolved by fresh-transcript rebind"),
     );
     expect(log.warn).not.toHaveBeenCalledWith(
